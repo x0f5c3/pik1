@@ -102,8 +102,10 @@ def find_acm_by_usb_id(vid: str, pid: str) -> Optional[str]:
             product_f = os.path.join(cur, 'idProduct')
             if os.path.isfile(vendor_f) and os.path.isfile(product_f):
                 try:
-                    v = open(vendor_f).read().strip()
-                    p = open(product_f).read().strip()
+                    with open(vendor_f) as f:
+                        v = f.read().strip()
+                    with open(product_f) as f:
+                        p = f.read().strip()
                     if v == vid and p == pid:
                         return f'/dev/{name}'
                 except OSError:
@@ -116,23 +118,6 @@ def find_acm_by_usb_id(vid: str, pid: str) -> Optional[str]:
     return None
 
 
-def wait_for_acm(vid: str, pid: str) -> str:
-    """
-    Block until a ttyACM* matching vid:pid appears in sysfs.
-    Logs once on first miss, then every 10s. Returns the device path.
-    """
-    logged = False
-    last_log = 0.0
-    while True:
-        dev = find_acm_by_usb_id(vid, pid)
-        if dev is not None:
-            return dev
-        now = time.monotonic()
-        if not logged or (now - last_log) >= 10.0:
-            _log(f'USB {vid}:{pid} -- waiting for device to appear...')
-            logged = True
-            last_log = now
-        time.sleep(0.5)
 
 # -- TTY helpers ----------------------------------------------------------------
 
@@ -171,6 +156,32 @@ def open_pty_raw(baud: int) -> Tuple[int, int]:
     fcntl.fcntl(master_fd, fcntl.F_SETFL,
                 fcntl.fcntl(master_fd, fcntl.F_GETFL) | os.O_NONBLOCK)
     return master_fd, slave_fd
+
+
+# -- Selector helper ------------------------------------------------------------
+
+def _sel_update(sel: selectors.BaseSelector, fd, events: int,
+                callback, in_sel: bool) -> bool:
+    """Register, modify, or unregister *fd* in *sel* based on *events*.
+    Returns the new in_sel state (True if fd is registered after the call)."""
+    if events == 0:
+        if in_sel:
+            try:
+                sel.unregister(fd)
+            except Exception:
+                pass
+        return False
+    if in_sel:
+        try:
+            sel.modify(fd, events, callback)
+        except Exception:
+            pass
+    else:
+        try:
+            sel.register(fd, events, callback)
+        except Exception:
+            pass
+    return True
 
 
 # -- Frame builder --------------------------------------------------------------
@@ -237,11 +248,13 @@ class LinkTxQueue:
 
     def __init__(self):
         self._buf: bytearray = bytearray()
-        self.queued_bytes = 0
+
+    @property
+    def queued_bytes(self) -> int:
+        return len(self._buf)
 
     def enqueue(self, frame: bytes) -> None:
         self._buf += frame
-        self.queued_bytes += len(frame)
 
     def empty(self) -> bool:
         return not self._buf
@@ -259,7 +272,6 @@ class LinkTxQueue:
                 return 0
             raise
         del self._buf[:written]
-        self.queued_bytes -= written
         return written
 
 
@@ -419,24 +431,8 @@ class McuChannel(Channel):
         events = (selectors.EVENT_READ if not self._bp_paused else 0)
         if self._txbuf:
             events |= selectors.EVENT_WRITE
-        if events == 0:
-            if self._uart_in_sel:
-                try:
-                    self._sel.unregister(self._fd)
-                except Exception:
-                    pass
-                self._uart_in_sel = False
-        elif self._uart_in_sel:
-            try:
-                self._sel.modify(self._fd, events, self._on_uart_event)
-            except Exception:
-                pass
-        else:
-            try:
-                self._sel.register(self._fd, events, self._on_uart_event)
-                self._uart_in_sel = True
-            except Exception:
-                pass
+        self._uart_in_sel = _sel_update(
+            self._sel, self._fd, events, self._on_uart_event, self._uart_in_sel)
 
     # -- State machine ----------------------------------------------------------
 
@@ -613,7 +609,13 @@ class PtyChannel(Channel):
         if mask & selectors.EVENT_READ:
             try:
                 data = os.read(self._master_fd, 4096)
-            except (BlockingIOError, OSError):
+            except BlockingIOError:
+                data = None
+            except OSError as e:
+                if e.errno == errno.EIO:
+                    # All slave fds closed (Klipper disconnected); tear down so
+                    # it gets EIO on its held fd and enters its reconnect loop.
+                    self._close_pty()
                 data = None
             if data:
                 self._send(F_DATA, self.channel_id, data)
@@ -629,8 +631,13 @@ class PtyChannel(Channel):
         except BlockingIOError:
             pass
         except OSError as e:
-            _log(f'PTY ch{self.channel_id}: write error: {e}')
-            self._txbuf.clear()
+            if e.errno == errno.EIO:
+                # No slave is open yet -- hold the buffer and retry when
+                # Klipper opens the symlink and EVENT_WRITE fires again.
+                pass
+            else:
+                _log(f'PTY ch{self.channel_id}: write error: {e}')
+                self._txbuf.clear()
         self._update_master_interest()
 
     def _update_master_interest(self) -> None:
@@ -639,24 +646,8 @@ class PtyChannel(Channel):
         events = (selectors.EVENT_READ if not self._bp_paused else 0)
         if self._txbuf:
             events |= selectors.EVENT_WRITE
-        if events == 0:
-            if self._master_in_sel:
-                try:
-                    self._sel.unregister(self._master_fd)
-                except Exception:
-                    pass
-                self._master_in_sel = False
-        elif self._master_in_sel:
-            try:
-                self._sel.modify(self._master_fd, events, self._on_master_event)
-            except Exception:
-                pass
-        else:
-            try:
-                self._sel.register(self._master_fd, events, self._on_master_event)
-                self._master_in_sel = True
-            except Exception:
-                pass
+        self._master_in_sel = _sel_update(
+            self._sel, self._master_fd, events, self._on_master_event, self._master_in_sel)
 
     # -- Channel interface --------------------------------------------------------
 
@@ -720,9 +711,84 @@ class _TcpConn:
         self.in_sel     = False
 
 
+# -- TCP channel base -----------------------------------------------------------
+
+class _TcpChannelBase(Channel):
+    """Shared plumbing for TcpSourceChannel and TcpDestChannel."""
+
+    _side: str = '?'   # set by subclasses for log messages
+
+    def __init__(self, channel_id: int, send: SendFn, sel: selectors.BaseSelector):
+        super().__init__(channel_id)
+        self._send      = send
+        self._sel       = sel
+        self._bp_paused = False
+        self._conns:   Dict[int, _TcpConn]      = {}
+        self._by_sock: Dict[socket.socket, int] = {}
+
+    def _wants_write(self, conn: _TcpConn) -> bool:
+        """Return True if WRITE interest should be registered for this conn."""
+        return bool(conn.txbuf)
+
+    def _notify_ok(self) -> bool:
+        """Return True if it is safe to send F_TCLOSE to the peer."""
+        return True
+
+    def _update_sock_interest(self, cid: int) -> None:
+        conn = self._conns.get(cid)
+        if conn is None:
+            return
+        events = (selectors.EVENT_READ if not self._bp_paused else 0)
+        if self._wants_write(conn):
+            events |= selectors.EVENT_WRITE
+        conn.in_sel = _sel_update(self._sel, conn.sock, events,
+                                   self._on_tcp_event, conn.in_sel)
+
+    def _on_tcp_event(self, key, mask) -> None:
+        raise NotImplementedError
+
+    def _close_cid(self, cid: int, notify: bool = False) -> None:
+        conn = self._conns.pop(cid, None)
+        if conn is None:
+            return
+        self._by_sock.pop(conn.sock, None)
+        try:
+            self._sel.unregister(conn.sock)
+        except Exception:
+            pass
+        try:
+            conn.sock.close()
+        except Exception:
+            pass
+        if notify and self._notify_ok():
+            self._send(F_TCLOSE, self.channel_id, _pack_cid(cid))
+        _log(f'TCP {self._side} ch{self.channel_id}: closed cid={cid}')
+
+    def on_link_disconnect(self) -> None:
+        for cid in list(self._conns):
+            self._close_cid(cid, notify=False)
+
+    def pause_source_reads(self) -> None:
+        if self._bp_paused:
+            return
+        self._bp_paused = True
+        for cid in list(self._conns):
+            self._update_sock_interest(cid)
+
+    def resume_source_reads(self) -> None:
+        if not self._bp_paused:
+            return
+        self._bp_paused = False
+        for cid in list(self._conns):
+            self._update_sock_interest(cid)
+
+    def close(self) -> None:
+        self.on_link_disconnect()
+
+
 # -- TCP source channel -- exporter side ----------------------------------------
 
-class TcpSourceChannel(Channel):
+class TcpSourceChannel(_TcpChannelBase):
     """
     Listens for TCP connections (e.g., from the stock screen) and tunnels
     each one to the host via TCONN / TDATA / TCLOSE frames.
@@ -731,16 +797,13 @@ class TcpSourceChannel(Channel):
     All connections are torn down when the link goes down.
     """
 
+    _side = 'src'
+
     def __init__(self, channel_id: int, bind_addr: str, bind_port: int,
                  send: SendFn, sel: selectors.BaseSelector):
-        super().__init__(channel_id)
-        self._send     = send
-        self._sel      = sel
+        super().__init__(channel_id, send, sel)
         self._link_up  = False
-        self._bp_paused = False
         self._next_cid = 0
-        self._conns:   Dict[int, _TcpConn]       = {}
-        self._by_sock: Dict[socket.socket, int]  = {}
 
         self._server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -749,6 +812,9 @@ class TcpSourceChannel(Channel):
         self._server.setblocking(False)
         self._sel.register(self._server, selectors.EVENT_READ, self._on_accept)
         _log(f'TCP src ch{channel_id}: listening {bind_addr}:{bind_port}')
+
+    def _notify_ok(self) -> bool:
+        return self._link_up
 
     def _alloc_cid(self) -> Optional[int]:
         for _ in range(65536):
@@ -828,49 +894,6 @@ class TcpSourceChannel(Channel):
                         return
             self._update_sock_interest(cid)
 
-    def _update_sock_interest(self, cid: int) -> None:
-        conn = self._conns.get(cid)
-        if conn is None:
-            return
-        events = (selectors.EVENT_READ if not self._bp_paused else 0)
-        if conn.txbuf:
-            events |= selectors.EVENT_WRITE
-        if events == 0:
-            if conn.in_sel:
-                try:
-                    self._sel.unregister(conn.sock)
-                except Exception:
-                    pass
-                conn.in_sel = False
-        elif conn.in_sel:
-            try:
-                self._sel.modify(conn.sock, events, self._on_tcp_event)
-            except Exception:
-                pass
-        else:
-            try:
-                self._sel.register(conn.sock, events, self._on_tcp_event)
-                conn.in_sel = True
-            except Exception:
-                pass
-
-    def _close_cid(self, cid: int, notify: bool = False) -> None:
-        conn = self._conns.pop(cid, None)
-        if conn is None:
-            return
-        self._by_sock.pop(conn.sock, None)
-        try:
-            self._sel.unregister(conn.sock)
-        except Exception:
-            pass
-        try:
-            conn.sock.close()
-        except Exception:
-            pass
-        if notify and self._link_up:
-            self._send(F_TCLOSE, self.channel_id, _pack_cid(cid))
-        _log(f'TCP src ch{self.channel_id}: closed cid={cid}')
-
     def on_frame(self, ftype: int, payload: bytes) -> None:
         cid, data = _unpack_cid(payload)
         if cid is None:
@@ -892,25 +915,10 @@ class TcpSourceChannel(Channel):
 
     def on_link_disconnect(self) -> None:
         self._link_up = False
-        for cid in list(self._conns):
-            self._close_cid(cid, notify=False)
-
-    def pause_source_reads(self) -> None:
-        if self._bp_paused:
-            return
-        self._bp_paused = True
-        for cid in list(self._conns):
-            self._update_sock_interest(cid)
-
-    def resume_source_reads(self) -> None:
-        if not self._bp_paused:
-            return
-        self._bp_paused = False
-        for cid in list(self._conns):
-            self._update_sock_interest(cid)
+        super().on_link_disconnect()
 
     def close(self) -> None:
-        self.on_link_disconnect()
+        super().close()
         try:
             self._sel.unregister(self._server)
         except Exception:
@@ -923,22 +931,22 @@ class TcpSourceChannel(Channel):
 
 # -- TCP destination channel -- host side ---------------------------------------
 
-class TcpDestChannel(Channel):
+class TcpDestChannel(_TcpChannelBase):
     """
     Receives TCONN / TDATA / TCLOSE frames from the exporter and connects
     each to a local TCP service (e.g., Moonraker on localhost:7125).
     """
 
+    _side = 'dst'
+
     def __init__(self, channel_id: int, dest_addr: str, dest_port: int,
                  send: SendFn, sel: selectors.BaseSelector):
-        super().__init__(channel_id)
-        self._send      = send
-        self._sel       = sel
+        super().__init__(channel_id, send, sel)
         self._dest_addr = dest_addr
         self._dest_port = dest_port
-        self._bp_paused = False
-        self._conns:   Dict[int, _TcpConn]       = {}
-        self._by_sock: Dict[socket.socket, int]  = {}
+
+    def _wants_write(self, conn: _TcpConn) -> bool:
+        return bool(conn.txbuf or conn.connecting)
 
     def on_frame(self, ftype: int, payload: bytes) -> None:
         cid, data = _unpack_cid(payload)
@@ -1044,66 +1052,12 @@ class TcpDestChannel(Channel):
             else:
                 self._close_cid(cid, notify=True)
 
-    def _update_sock_interest(self, cid: int) -> None:
-        conn = self._conns.get(cid)
-        if conn is None:
-            return
-        events = (selectors.EVENT_READ if not self._bp_paused else 0)
-        if conn.txbuf or conn.connecting:
-            events |= selectors.EVENT_WRITE
-        if events == 0:
-            if conn.in_sel:
-                try:
-                    self._sel.unregister(conn.sock)
-                except Exception:
-                    pass
-                conn.in_sel = False
-        elif conn.in_sel:
-            try:
-                self._sel.modify(conn.sock, events, self._on_tcp_event)
-            except Exception:
-                pass
-        else:
-            try:
-                self._sel.register(conn.sock, events, self._on_tcp_event)
-                conn.in_sel = True
-            except Exception:
-                pass
-
-    def _close_cid(self, cid: int, notify: bool = False) -> None:
-        conn = self._conns.pop(cid, None)
-        if conn is None:
-            return
-        self._by_sock.pop(conn.sock, None)
-        try:
-            self._sel.unregister(conn.sock)
-        except Exception:
-            pass
-        try:
-            conn.sock.close()
-        except Exception:
-            pass
-        if notify:
-            self._send(F_TCLOSE, self.channel_id, _pack_cid(cid))
-        _log(f'TCP dst ch{self.channel_id}: closed cid={cid}')
-
-    def on_link_disconnect(self) -> None:
-        for cid in list(self._conns):
-            self._close_cid(cid, notify=False)
-
-    def pause_source_reads(self) -> None:
-        if self._bp_paused:
-            return
-        self._bp_paused = True
-        for cid in list(self._conns):
-            self._update_sock_interest(cid)
-
-    def resume_source_reads(self) -> None:
-        if not self._bp_paused:
-            return
-        self._bp_paused = False
-        for cid in list(self._conns):
-            self._update_sock_interest(cid)
+    def on_link_connect(self) -> None:
+        # Clear any stale connections from a previous session: the peer may have
+        # restarted without a USB disconnect, resetting its conn_id counter.
+        # If we still hold entries for those IDs, incoming F_TCONN frames would
+        # be silently dropped, leaving the screen unable to reconnect.
+        self.on_link_disconnect()
 
     def close(self) -> None:
         self.on_link_disconnect()
@@ -1155,7 +1109,11 @@ class Daemon:
     def _open_link(self) -> None:
         dev = self._resolve_link_dev()
         if dev is None:
-            _log('Link: no device available')
+            if self._usb_id:
+                _log(f'Link: USB {self._usb_id[0]}:{self._usb_id[1]} not found'
+                     f' -- retry in {self._reopen_delay:.1f}s')
+            else:
+                _log('Link: no device available')
             self._schedule_reopen()
             return
         try:
@@ -1404,7 +1362,7 @@ class ConfigError(Exception):
     pass
 
 
-def _validate_int(value: str, name: str, min_val: int = None, max_val: int = None) -> int:
+def _validate_int(value: str, name: str, min_val: Optional[int] = None, max_val: Optional[int] = None) -> int:
     try:
         n = int(value)
     except ValueError:
@@ -1674,17 +1632,6 @@ def main() -> None:
     def send(ftype: int, channel: int, payload: bytes) -> None:
         if daemon_ref[0] is not None:
             daemon_ref[0].send(ftype, channel, payload)
-
-    # If using USB discovery, block here until the device appears once.
-    # After this point _resolve_link_dev is always non-blocking, so a
-    # USB disconnect mid-run causes a scheduled retry rather than freezing
-    # the main loop.
-    if usb_id is not None:
-        vid, pid = usb_id
-        dev = find_acm_by_usb_id(vid, pid)
-        if dev is None:
-            wait_for_acm(vid, pid)
-            _log(f'USB {vid}:{pid} -- found, starting daemon')
 
     channels = build_channels(args.mode, args.channels, send, sel)
     daemon   = Daemon(args.mode, args.link_dev, sel, channels, usb_id=usb_id)
