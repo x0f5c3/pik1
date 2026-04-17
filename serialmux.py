@@ -98,17 +98,16 @@ def find_acm_by_usb_id(vid: str, pid: str) -> Optional[str]:
             pass
         cur = path
         for _ in range(8):
-            vendor_f = os.path.join(cur, 'idVendor')
-            product_f = os.path.join(cur, 'idProduct')
-            if os.path.isfile(vendor_f) and os.path.isfile(product_f):
-                try:
-                    v = open(vendor_f).read().strip()
-                    p = open(product_f).read().strip()
-                    if v == vid and p == pid:
+            # Avoid extra stat calls from os.path.isfile(); just try to open and
+            # catch errors.  idVendor is always present when idProduct is.
+            try:
+                with open(os.path.join(cur, 'idVendor')) as fv, \
+                     open(os.path.join(cur, 'idProduct')) as fp:
+                    if fv.read().strip() == vid and fp.read().strip() == pid:
                         return f'/dev/{name}'
-                except OSError:
-                    pass
                 break
+            except OSError:
+                pass
             parent = os.path.dirname(cur)
             if parent == cur:
                 break
@@ -207,18 +206,21 @@ class FrameParser:
                 del self._buf[:i]
             if len(self._buf) < HDR_SIZE:
                 break
-            _, ftype, channel, length = struct.unpack(HDR_FMT, self._buf[:HDR_SIZE])
+            _, ftype, channel, length = struct.unpack_from(HDR_FMT, self._buf)
             if length > MAX_PAYLOAD:
                 del self._buf[:2]   # skip magic, rescan
                 continue
             total = HDR_SIZE + length + CRC_SIZE
             if len(self._buf) < total:
                 break
-            payload  = bytes(self._buf[HDR_SIZE:HDR_SIZE + length])
-            crc_rx,  = struct.unpack('<I', self._buf[HDR_SIZE + length:total])
-            if (zlib.crc32(payload) & 0xFFFFFFFF) != crc_rx:
+            # Use memoryview to avoid allocating a copy of the payload for the CRC
+            # check; bytes() is deferred until the CRC passes.
+            view = memoryview(self._buf)
+            crc_rx, = struct.unpack_from('<I', self._buf, HDR_SIZE + length)
+            if (zlib.crc32(view[HDR_SIZE:HDR_SIZE + length]) & 0xFFFFFFFF) != crc_rx:
                 del self._buf[:2]
                 continue
+            payload = bytes(view[HDR_SIZE:HDR_SIZE + length])
             del self._buf[:total]
             try:
                 self._cb(ftype, channel, payload)
@@ -232,11 +234,16 @@ class LinkTxQueue:
     """
     Outbound frame queue for the CDC link.
     Frames are appended to a bytearray and drained with a single os.write().
-    Partial writes are handled by advancing an offset into the buffer.
+    Partial writes are tracked with a read-offset so the head of the buffer is
+    not copied on every partial drain (the bytearray is compacted once the
+    offset grows past a threshold).
     """
+
+    _COMPACT_THRESHOLD = 65536
 
     def __init__(self):
         self._buf: bytearray = bytearray()
+        self._offset: int = 0
         self.queued_bytes = 0
 
     def enqueue(self, frame: bytes) -> None:
@@ -244,22 +251,26 @@ class LinkTxQueue:
         self.queued_bytes += len(frame)
 
     def empty(self) -> bool:
-        return not self._buf
+        return self._offset >= len(self._buf)
 
     def drain_to_fd(self, fd: int) -> int:
         """Drain as much as possible with one write. Returns bytes written."""
-        if not self._buf:
+        if self._offset >= len(self._buf):
             return 0
         try:
-            written = os.write(fd, self._buf)
+            written = os.write(fd, memoryview(self._buf)[self._offset:])
         except BlockingIOError:
             return 0
         except OSError as e:
             if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
                 return 0
             raise
-        del self._buf[:written]
+        self._offset += written
         self.queued_bytes -= written
+        # Compact when the dead prefix grows large enough to be worth the copy.
+        if self._offset >= self._COMPACT_THRESHOLD:
+            del self._buf[:self._offset]
+            self._offset = 0
         return written
 
 

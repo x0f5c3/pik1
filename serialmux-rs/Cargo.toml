@@ -1,0 +1,21 @@
+[package]
+name = "serialmux"
+version = "0.1.0"
+edition = "2021"
+description = "Klipper serial + TCP multiplexer over a USB CDC gadget link (Rust port)"
+
+[[bin]]
+name = "serialmux"
+path = "src/main.rs"
+
+[dependencies]
+mio       = { version = "1.2",  features = ["os-poll", "net", "os-ext"] }
+crc32fast = "1.5"
+nix       = { version = "0.31", features = ["term", "fs"] }
+libc      = "0.2"
+
+[profile.release]
+opt-level   = 3
+lto         = "thin"
+strip       = true
+codegen-units = 1
