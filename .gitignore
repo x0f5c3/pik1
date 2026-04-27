@@ -1,3 +1,4 @@
 __pycache__/
 .toolchain/
-build/
+build/serialmux
+build/serialmux.armv7
