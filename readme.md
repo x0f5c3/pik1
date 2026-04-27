@@ -88,19 +88,6 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
 
 1. #### Install Simple AF for RPi
     Install [Simple AF for RPi](https://pellcorp.github.io/creality-wiki/rpi/).
-    Before running the installer, run this to get the appropriate printer profiles:
-
-    ```bash
-    ~/pellcorp/installer.sh --branch jp_k1_pi_base_printers
-    ```
-
-    > If you have a K1 or K1 Max and are unsure whether it is a 2023 or 2024
-    > variant, run this on the K1. If it returns `1` it is 2024, otherwise 2023:
-    > ```sh
-    > /usr/bin/get_sn_mac.sh structure_version
-    > ```
-
-    Continue installing Simple AF for RPi using the appropriate profile for your printer.
 
 2. #### Enable USB OTG mode
     Run the following script once to configure the Pi to act as a USB gadget. This
@@ -173,7 +160,7 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
 ### K1 side
 
 1. #### Install Simple AF
-    - If not already done, install [Simple AF](https://pellcorp.github.io/creality-wiki/) on the K1.
+    Install [Simple AF](https://pellcorp.github.io/creality-wiki/) on the K1.
 
 2. #### Install pik1
     From the repo directory on the K1 (pre-built binary included):
