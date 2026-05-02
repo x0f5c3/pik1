@@ -117,7 +117,8 @@ typedef struct {
     int      fd;
     int      in_epoll;
     int      connecting;
-    uint8_t *txbuf;       /* malloc on open, NULL = slot empty */
+    int      close_pending; /* drain txbuf then close, no further reads */
+    uint8_t *txbuf;         /* malloc on open, NULL = slot empty */
     size_t   txbuf_len;
 } tcp_conn_t;
 

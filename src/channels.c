@@ -258,7 +258,7 @@ static void tcp_conn_update(tcp_conn_t *c, int epfd,
                              uint64_t tag, int bp_paused)
 {
     if (c->fd < 0) return;
-    uint32_t ev = bp_paused ? 0 : EPOLLIN;
+    uint32_t ev = (bp_paused || c->close_pending) ? 0 : EPOLLIN;
     if (c->txbuf_len || c->connecting) ev |= EPOLLOUT;
     epoll_update(epfd, c->fd, ev, tag, &c->in_epoll);
 }
@@ -272,6 +272,7 @@ static void tcp_conn_close_fd(tcp_conn_t *c, int epfd)
     if (c->txbuf) { free(c->txbuf); c->txbuf = NULL; }
     c->txbuf_len = 0;
     c->connecting = 0;
+    c->close_pending = 0;
 }
 
 /* ── TcpSourceChannel ───────────────────────────────────────────────────── */
@@ -341,7 +342,7 @@ static void src_on_conn_event(tcp_src_t *s, int cid, uint32_t events)
     tcp_conn_t *c = &s->conns[cid];
     if (c->fd < 0) return;
 
-    if (events & EPOLLIN) {
+    if ((events & EPOLLIN) && !c->close_pending) {
         uint8_t buf[65536];
         ssize_t n = recv(c->fd, buf, sizeof(buf), 0);
         if (n < 0) {
@@ -377,6 +378,10 @@ static void src_on_conn_event(tcp_src_t *s, int cid, uint32_t events)
             c->txbuf_len -= (size_t)n;
             if (c->txbuf_len)
                 memmove(c->txbuf, c->txbuf + n, c->txbuf_len);
+            if (c->txbuf_len == 0 && c->close_pending) {
+                src_close_cid(s, cid, 0);
+                return;
+            }
         }
         tcp_conn_update(c, s->base.d->epoll_fd,
                         TAG_TCPCONN(s->base.id, cid), s->bp_paused);
@@ -505,13 +510,17 @@ static void dst_on_conn_event(tcp_dst_t *dst, int cid, uint32_t events)
             ssize_t n = send(c->fd, c->txbuf, c->txbuf_len, MSG_NOSIGNAL);
             if (n < 0) {
                 if (errno != EAGAIN && errno != EWOULDBLOCK) {
-                    dst_close_cid(dst, cid, 1);
+                    dst_close_cid(dst, cid, c->close_pending ? 0 : 1);
                     return;
                 }
             } else if (n > 0) {
                 c->txbuf_len -= (size_t)n;
                 if (c->txbuf_len)
                     memmove(c->txbuf, c->txbuf + n, c->txbuf_len);
+                if (c->txbuf_len == 0 && c->close_pending) {
+                    dst_close_cid(dst, cid, 0);
+                    return;
+                }
             }
         }
         tcp_conn_update(c, dst->base.d->epoll_fd,
@@ -621,7 +630,15 @@ void ch_on_frame(channel_t *ch, uint8_t ftype, const uint8_t *payload, uint16_t 
             tcp_conn_update(c, s->base.d->epoll_fd,
                             TAG_TCPCONN(s->base.id, cid), s->bp_paused);
         } else if (ftype == F_TCLOSE) {
-            src_close_cid(s, cid, 0);
+            tcp_conn_t *c = &s->conns[cid];
+            if (c->fd < 0) return;
+            if (c->txbuf_len == 0) {
+                src_close_cid(s, cid, 0);
+            } else {
+                c->close_pending = 1;
+                tcp_conn_update(c, s->base.d->epoll_fd,
+                                TAG_TCPCONN(s->base.id, cid), s->bp_paused);
+            }
         }
         break;
     }
@@ -649,7 +666,15 @@ void ch_on_frame(channel_t *ch, uint8_t ftype, const uint8_t *payload, uint16_t 
             tcp_conn_update(c, dst->base.d->epoll_fd,
                             TAG_TCPCONN(dst->base.id, cid), dst->bp_paused);
         } else if (ftype == F_TCLOSE) {
-            dst_close_cid(dst, cid, 0);
+            tcp_conn_t *c = &dst->conns[cid];
+            if (c->fd < 0) return;
+            if (c->txbuf_len == 0) {
+                dst_close_cid(dst, cid, 0);
+            } else {
+                c->close_pending = 1;
+                tcp_conn_update(c, dst->base.d->epoll_fd,
+                                TAG_TCPCONN(dst->base.id, cid), dst->bp_paused);
+            }
         }
         break;
     }

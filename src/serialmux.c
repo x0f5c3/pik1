@@ -185,12 +185,15 @@ char *find_acm_by_usb_id(const char *vid, const char *pid, char *out, size_t out
 void fp_feed(frame_parser_t *fp, struct daemon *d,
              const uint8_t *data, size_t n)
 {
-    /* Append to internal buffer, capped at buffer size */
-    size_t copy = n;
-    if (fp->len + copy > sizeof(fp->buf))
-        copy = sizeof(fp->buf) - fp->len;
-    memcpy(fp->buf + fp->len, data, copy);
-    fp->len += copy;
+    size_t pos = 0;
+    while (pos < n) {
+        /* Fill: copy as much input as fits, then parse all complete frames */
+        size_t space = sizeof(fp->buf) - fp->len;
+        size_t copy  = n - pos;
+        if (copy > space) copy = space;
+        memcpy(fp->buf + fp->len, data + pos, copy);
+        fp->len += copy;
+        pos     += copy;
 
     while (fp->len >= 2) {
         /* Find magic */
@@ -252,6 +255,7 @@ void fp_feed(frame_parser_t *fp, struct daemon *d,
 
         memmove(fp->buf, fp->buf + total, fp->len - total);
         fp->len -= total;
+    }
     }
 }
 
