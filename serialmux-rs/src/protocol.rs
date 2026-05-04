@@ -65,7 +65,7 @@ pub fn build_frame(ftype: u8, channel: u8, payload: &[u8]) -> Vec<u8> {
     let length = payload.len();
     // CRC32 with the standard reflected polynomial (zlib / ISO 3309), matching
     // the C `crc32_buf()` implementation (poly 0xEDB88320).
-    let crc = if length > 0 { crc32fast::hash(payload) } else { 0 };
+    let crc = crc32fast::hash(payload);
     let mut out = Vec::with_capacity(HDR_SIZE + length + CRC_SIZE);
     out.extend_from_slice(&[0xAA, 0x55, ftype, channel]);
     out.extend_from_slice(&(length as u16).to_le_bytes());
@@ -132,8 +132,12 @@ impl FrameParser {
             let space = PARSER_BUF_CAP - self.len;
             let copy  = std::cmp::min(data.len() - pos, space);
             if copy == 0 {
-                // Buffer full with no progress — should not happen under normal
-                // backpressure, but guard to avoid an infinite loop.
+                // Buffer full with no progress.  This should not happen under
+                // normal backpressure, but guard to avoid an infinite loop.
+                // Log so operators can diagnose backpressure failures.
+                crate::serial::log(
+                    "FrameParser: buffer full, dropping remaining input (backpressure missed)"
+                );
                 break;
             }
             self.buf[self.len..self.len + copy].copy_from_slice(&data[pos..pos + copy]);

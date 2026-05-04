@@ -356,8 +356,7 @@ impl Channel for McuChannel {
     }
 
     fn on_link_connect(&mut self, txq: &mut TxQueue, _reg: &Registry) {
-        self.link_up   = true;
-        self.last_rx   = Some(Instant::now());
+        self.link_up = true;
         if self.state == McuState::Active {
             txq.enqueue(&build_frame(F_READY, self.ch_id, b""));
         } else {
@@ -868,16 +867,13 @@ impl TcpSourceChannel {
                 return;
             }
             // If close_pending and txbuf fully drained, close without notify.
-            {
-                let conn = match self.conns[slot].as_mut() {
-                    Some(c) => c,
-                    None => return,
-                };
-                if conn.txbuf.is_empty() && conn.close_pending {
-                    let _ = conn; // end borrow before calling close_slot
-                    self.close_slot(slot, false, txq, reg);
-                    return;
-                }
+            let close_now = match self.conns[slot].as_ref() {
+                Some(c) => c.txbuf.is_empty() && c.close_pending,
+                None => return,
+            };
+            if close_now {
+                self.close_slot(slot, false, txq, reg);
+                return;
             }
             self.update_conn_interest(slot, reg);
         }
@@ -931,35 +927,46 @@ impl Channel for TcpSourceChannel {
 
         match ftype {
             F_TDATA => {
-                if let Some(conn) = self.conns[slot].as_mut() {
-                    if data.is_empty() { return; }
-                    let avail = CONN_HIGH_WATER + MAX_PAYLOAD - conn.txbuf.len();
-                    if data.len() > avail || conn.txbuf.len() > CONN_HIGH_WATER {
+                // Use a flag to avoid holding the `conn` borrow across `close_slot`
+                // and `update_conn_interest`, which both need `&mut self`.
+                enum TDataAction { Close, Update, Skip }
+                let action = if let Some(conn) = self.conns[slot].as_mut() {
+                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
+                        .saturating_sub(conn.txbuf.len());
+                    if data.is_empty() || conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
+                        TDataAction::Close
+                    } else {
+                        conn.txbuf.extend_from_slice(data);
+                        TDataAction::Update
+                    }
+                } else {
+                    TDataAction::Skip
+                };
+                match action {
+                    TDataAction::Close => {
                         log(&format!(
                             "TCP src ch{}: slot={} high-water -- closing",
                             self.ch_id, slot
                         ));
-                        let _ = conn; // end borrow before calling close_slot
                         self.close_slot(slot, true, txq, reg);
-                    } else {
-                        conn.txbuf.extend_from_slice(data);
-                        let _ = conn;
-                        self.update_conn_interest(slot, reg);
                     }
+                    TDataAction::Update => self.update_conn_interest(slot, reg),
+                    TDataAction::Skip   => {}
                 }
             }
             F_TCLOSE => {
-                if let Some(conn) = self.conns[slot].as_mut() {
+                let should_close = if let Some(conn) = self.conns[slot].as_mut() {
                     if conn.txbuf.is_empty() {
-                        // Nothing pending — close immediately without notify.
-                        let _ = conn;
-                        self.close_slot(slot, false, txq, reg);
+                        true
                     } else {
-                        // Drain first, then close.
                         conn.close_pending = true;
-                        let _ = conn;
-                        self.update_conn_interest(slot, reg);
+                        false
                     }
+                } else { return; };
+                if should_close {
+                    self.close_slot(slot, false, txq, reg);
+                } else {
+                    self.update_conn_interest(slot, reg);
                 }
             }
             _ => {}
@@ -1192,16 +1199,13 @@ impl TcpDestChannel {
                 return;
             }
             // close_pending: drain complete → close without sending F_TCLOSE.
-            {
-                let conn = match self.conns[slot].as_mut() {
-                    Some(c) => c,
-                    None => return,
-                };
-                if conn.txbuf.is_empty() && conn.close_pending {
-                        let _ = conn;
-                    self.close_slot(slot, false, txq, reg);
-                    return;
-                }
+            let close_now = match self.conns[slot].as_ref() {
+                Some(c) => c.txbuf.is_empty() && c.close_pending,
+                None => return,
+            };
+            if close_now {
+                self.close_slot(slot, false, txq, reg);
+                return;
             }
         }
 
@@ -1304,33 +1308,44 @@ impl Channel for TcpDestChannel {
                 }
             }
             F_TDATA => {
-                if let Some(conn) = self.conns[slot].as_mut() {
-                    if data.is_empty() { return; }
-                    let avail = CONN_HIGH_WATER + MAX_PAYLOAD - conn.txbuf.len();
-                    if data.len() > avail || conn.txbuf.len() > CONN_HIGH_WATER {
+                enum TDataAction { Close, Update, Skip }
+                let action = if let Some(conn) = self.conns[slot].as_mut() {
+                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
+                        .saturating_sub(conn.txbuf.len());
+                    if data.is_empty() || conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
+                        TDataAction::Close
+                    } else {
+                        conn.txbuf.extend_from_slice(data);
+                        TDataAction::Update
+                    }
+                } else {
+                    TDataAction::Skip
+                };
+                match action {
+                    TDataAction::Close => {
                         log(&format!(
                             "TCP dst ch{}: slot={} high-water -- closing",
                             self.ch_id, slot
                         ));
-                        let _ = conn;
                         self.close_slot(slot, true, txq, reg);
-                    } else {
-                        conn.txbuf.extend_from_slice(data);
-                        let _ = conn;
-                        self.update_conn_interest(slot, reg);
                     }
+                    TDataAction::Update => self.update_conn_interest(slot, reg),
+                    TDataAction::Skip   => {}
                 }
             }
             F_TCLOSE => {
-                if let Some(conn) = self.conns[slot].as_mut() {
+                let should_close = if let Some(conn) = self.conns[slot].as_mut() {
                     if conn.txbuf.is_empty() {
-                        let _ = conn;
-                        self.close_slot(slot, false, txq, reg);
+                        true
                     } else {
                         conn.close_pending = true;
-                        let _ = conn;
-                        self.update_conn_interest(slot, reg);
+                        false
                     }
+                } else { return; };
+                if should_close {
+                    self.close_slot(slot, false, txq, reg);
+                } else {
+                    self.update_conn_interest(slot, reg);
                 }
             }
             _ => {}
