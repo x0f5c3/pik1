@@ -1,4 +1,15 @@
-use std::collections::HashMap;
+//! Channel implementations.
+//!
+//! Each channel type wraps one or more file descriptors and speaks a specific
+//! sub-protocol over the shared link.  The [`Channel`] trait provides the
+//! uniform interface used by [`crate::daemon::Daemon`].
+//!
+//! Channel types:
+//! - [`McuChannel`]       – UART ↔ F_DATA frames (exporter side)
+//! - [`PtyChannel`]       – PTY  ↔ F_DATA frames (host side)
+//! - [`TcpSourceChannel`] – TCP listener → F_TCONN/F_TDATA/F_TCLOSE (exporter)
+//! - [`TcpDestChannel`]   – TCP connector ← F_TCONN/F_TDATA/F_TCLOSE (host)
+
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
 
@@ -9,72 +20,115 @@ use crate::protocol::{
     build_frame, TxQueue, F_DATA, F_FLUSH, F_READY, F_TCLOSE, F_TCONN, F_TDATA,
     KLIPPER_SYNC, MAX_PAYLOAD,
 };
-use crate::serial::{log, open_pty_raw, open_serial_fd, pty_slave_name,
-                    read_nonblock, write_nonblock};
+use crate::serial::{
+    close_raw, log, open_pty_raw, open_serial_fd, pty_slave_name, read_nonblock,
+    write_nonblock,
+};
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Token layout
-// ---------------------------------------------------------------------------
-// TOKEN_LINK (0)         – link fd (managed by Daemon)
-// 1..=63                 – channel primary fd  (channel N = token N+1)
-// 64 + N*1024 + slot     – TCP connection slot for channel N  (slot 0..1023)
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// Token(0)               – link fd (managed by Daemon)
+// Token(1..=63)          – channel primary fd  (channel N → token N+1)
+// Token(TCP_BASE + N*MAX_TCP_CONNS + slot) – TCP connection slot for channel N
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// mio token reserved for the link fd.
 pub const TOKEN_LINK: Token = Token(0);
-pub const TCP_TOKEN_BASE: usize = 64;
-pub const TCP_SLOTS: usize = 1024;
 
+/// Base token for TCP connection slots.
+const TCP_BASE: usize = 64;
+
+/// Maximum concurrent TCP connections per channel.  Matches the C
+/// `MAX_TCP_CONNS` constant so connection IDs are interchangeable on the wire.
+const MAX_TCP_CONNS: usize = 256;
+
+/// Compute the mio token for a channel's primary fd (UART / PTY / listen socket).
 pub fn primary_token(ch_id: u8) -> Token {
     Token(ch_id as usize + 1)
 }
 
+/// Compute the mio token for a TCP connection slot inside a channel.
 pub fn tcp_slot_token(ch_id: u8, slot: usize) -> Token {
-    Token(TCP_TOKEN_BASE + ch_id as usize * TCP_SLOTS + slot)
+    Token(TCP_BASE + ch_id as usize * MAX_TCP_CONNS + slot)
 }
 
-/// Map any token back to the owning channel id.
+/// Reverse-map any token to its owning channel id.
+///
+/// Returns `None` for `TOKEN_LINK`.
 pub fn channel_id_for_token(token: Token) -> Option<u8> {
     match token.0 {
         0 => None,
         1..=63 => Some((token.0 - 1) as u8),
         t => {
-            let id = (t - TCP_TOKEN_BASE) / TCP_SLOTS;
+            let id = (t - TCP_BASE) / MAX_TCP_CONNS;
             if id <= 62 { Some(id as u8) } else { None }
         }
     }
 }
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Channel trait
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// Uniform interface implemented by all channel types.
 pub trait Channel {
+    /// The wire channel id (0–255).
     fn channel_id(&self) -> u8;
+
+    /// A frame arrived from the far side of the link.
     fn on_frame(&mut self, ftype: u8, payload: &[u8], txq: &mut TxQueue, reg: &Registry);
+
+    /// The link just completed its handshake.
     fn on_link_connect(&mut self, txq: &mut TxQueue, reg: &Registry);
+
+    /// The link dropped.  Close all associated I/O and clean up state.
     fn on_link_disconnect(&mut self, reg: &Registry);
+
+    /// Periodic timer tick.  Handles UART reopen, MCU silence timeout, etc.
     fn tick(&mut self, now: Instant, txq: &mut TxQueue, reg: &Registry);
+
+    /// Earliest instant at which [`tick`] must run, or `None` if not needed.
     fn next_deadline(&self) -> Option<Instant>;
-    fn handle_event(&mut self, token: Token, readable: bool, writable: bool,
-                    txq: &mut TxQueue, reg: &Registry);
+
+    /// A mio event fired for one of this channel's registered fds.
+    fn handle_event(
+        &mut self,
+        token:    Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    );
+
+    /// Close all fds and deregister from mio.
+    ///
+    /// Called on controlled teardown.  The daemon runs indefinitely and
+    /// channels clean themselves up in [`on_link_disconnect`], so this method
+    /// is available for completeness and future use.
+    #[allow(dead_code)]
     fn close(&mut self, reg: &Registry);
+
+    /// Suspend inbound reads (backpressure: link TX queue above high-water).
     fn pause_source_reads(&mut self, reg: &Registry);
+
+    /// Resume inbound reads (link TX queue drained below low-water).
     fn resume_source_reads(&mut self, reg: &Registry);
 }
 
-// ---------------------------------------------------------------------------
-// Helper: register / modify / deregister a raw fd with mio
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// mio registry helpers
+// ─────────────────────────────────────────────────────────────────────────────
 
 fn reg_add(reg: &Registry, fd: RawFd, token: Token, interest: Interest) {
     if let Err(e) = reg.register(&mut SourceFd(&fd), token, interest) {
-        log(&format!("mio register fd={} token={:?} error: {}", fd, token, e));
+        log(&format!("mio register fd={} token={:?}: {}", fd, token, e));
     }
 }
 
 fn reg_mod(reg: &Registry, fd: RawFd, token: Token, interest: Interest) {
     if let Err(e) = reg.reregister(&mut SourceFd(&fd), token, interest) {
-        log(&format!("mio reregister fd={} token={:?} error: {}", fd, token, e));
+        log(&format!("mio reregister fd={} token={:?}: {}", fd, token, e));
     }
 }
 
@@ -82,40 +136,57 @@ fn reg_del(reg: &Registry, fd: RawFd) {
     let _ = reg.deregister(&mut SourceFd(&fd));
 }
 
-fn close_fd(fd: RawFd) {
-    unsafe { libc::close(fd); }
+// ─────────────────────────────────────────────────────────────────────────────
+// McuChannel  (exporter side: UART ↔ F_DATA frames)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// MCU state machine, matching the C `mcu_state_t` enum.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum McuState {
+    /// Initial / waiting for Klipper sync byte.
+    Init,
+    /// Klipper is running; forward all UART bytes.
+    Active,
+    /// MCU reset detected (silence timeout); drain and wait for sync.
+    Resetting,
 }
 
-// ---------------------------------------------------------------------------
-// McuChannel  (exporter side: UART → link)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-enum McuState { Init, Active, Resetting }
-
+/// Exporter-side MCU channel.
+///
+/// Reads bytes from a hardware UART and forwards them to the host as `F_DATA`
+/// frames.  Waits for Klipper's sync byte (`0x7E`) before declaring the MCU
+/// active, and transitions back to `Resetting` after [`RESET_SILENCE`] of
+/// silence.
 pub struct McuChannel {
-    ch_id: u8,
-    device: String,
-    baud: u32,
-    state: McuState,
-    fd: Option<RawFd>,
+    ch_id:    u8,
+    device:   String,
+    baud:     u32,
+    state:    McuState,
+    fd:       Option<RawFd>,
     fd_in_sel: bool,
-    txbuf: Vec<u8>,
-    last_rx: Option<Instant>,
+    /// Pending bytes to write to the UART (from the host).
+    txbuf:    Vec<u8>,
+    last_rx:  Option<Instant>,
     reopen_at: Option<Instant>,
     bp_paused: bool,
-    link_up: bool,
+    link_up:   bool,
 }
 
+/// How long the MCU must be silent before we declare a reset.
 const RESET_SILENCE: Duration = Duration::from_secs(5);
-const REOPEN_DELAY:  Duration = Duration::from_secs(2);
+/// How long to wait before re-opening a failed UART.
+const REOPEN_DELAY: Duration = Duration::from_secs(2);
 
 impl McuChannel {
+    /// Create a new MCU channel and immediately attempt to open the UART.
     pub fn new(ch_id: u8, device: String, baud: u32, reg: &Registry) -> Self {
         let mut ch = McuChannel {
-            ch_id, device, baud,
+            ch_id,
+            device,
+            baud,
             state: McuState::Init,
-            fd: None, fd_in_sel: false,
+            fd: None,
+            fd_in_sel: false,
             txbuf: Vec::new(),
             last_rx: None,
             reopen_at: None,
@@ -129,14 +200,19 @@ impl McuChannel {
     fn open_uart(&mut self, reg: &Registry) {
         match open_serial_fd(&self.device, self.baud) {
             Ok(fd) => {
-                self.fd = Some(fd);
+                self.fd        = Some(fd);
                 self.fd_in_sel = false;
-                log(&format!("MCU ch{}: opened {} @ {}", self.ch_id, self.device, self.baud));
+                log(&format!(
+                    "MCU ch{}: opened {} @ {}",
+                    self.ch_id, self.device, self.baud
+                ));
                 self.update_interest(reg);
             }
             Err(e) => {
-                log(&format!("MCU ch{}: cannot open {}: {} -- retry in 2s",
-                             self.ch_id, self.device, e));
+                log(&format!(
+                    "MCU ch{}: cannot open {}: {} -- retry in 2s",
+                    self.ch_id, self.device, e
+                ));
                 self.reopen_at = Some(Instant::now() + REOPEN_DELAY);
             }
         }
@@ -144,46 +220,63 @@ impl McuChannel {
 
     fn close_uart(&mut self, reg: &Registry) {
         if let Some(fd) = self.fd.take() {
-            if self.fd_in_sel { reg_del(reg, fd); }
-            close_fd(fd);
+            if self.fd_in_sel {
+                reg_del(reg, fd);
+            }
+            close_raw(fd);
         }
         self.fd_in_sel = false;
     }
 
+    /// Sync mio interest flags with the current channel state.
     fn update_interest(&mut self, reg: &Registry) {
-        let fd = match self.fd { Some(f) => f, None => return };
+        let fd = match self.fd {
+            Some(f) => f,
+            None => return,
+        };
         let mut interest = if self.bp_paused { None } else { Some(Interest::READABLE) };
         if !self.txbuf.is_empty() {
-            interest = Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
+            interest =
+                Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
         }
         let token = primary_token(self.ch_id);
         match (interest, self.fd_in_sel) {
-            (None, true)  => { reg_del(reg, fd); self.fd_in_sel = false; }
-            (None, false) => {}
+            (None, true)     => { reg_del(reg, fd); self.fd_in_sel = false; }
+            (None, false)    => {}
             (Some(i), false) => { reg_add(reg, fd, token, i); self.fd_in_sel = true; }
             (Some(i), true)  => { reg_mod(reg, fd, token, i); }
         }
     }
 
     fn uart_read(&mut self, txq: &mut TxQueue, reg: &Registry) {
-        let fd = match self.fd { Some(f) => f, None => return };
+        let fd = match self.fd {
+            Some(f) => f,
+            None => return,
+        };
         let mut buf = [0u8; 4096];
         match read_nonblock(fd, &mut buf) {
-            Ok(None) => {}
-            Ok(Some(0)) => {}
+            Ok(None) | Ok(Some(0)) => {}
             Ok(Some(n)) => {
                 self.last_rx = Some(Instant::now());
                 let data = &buf[..n];
                 match self.state {
                     McuState::Init | McuState::Resetting => {
+                        // Wait for Klipper sync byte 0x7E before forwarding.
                         if let Some(idx) = data.iter().position(|&b| b == KLIPPER_SYNC) {
-                            log(&format!("MCU ch{}: 0x7E seen at offset {} -> ACTIVE",
-                                        self.ch_id, idx));
+                            log(&format!(
+                                "MCU ch{}: 0x7E seen at offset {} -> ACTIVE",
+                                self.ch_id, idx
+                            ));
                             self.transition(McuState::Active, txq);
                             if self.link_up {
-                                txq.enqueue(&build_frame(F_DATA, self.ch_id, &data[idx..]));
+                                txq.enqueue(&build_frame(
+                                    F_DATA,
+                                    self.ch_id,
+                                    &data[idx..],
+                                ));
                             }
                         }
+                        // Bootloader noise before sync — discard.
                     }
                     McuState::Active => {
                         if self.link_up {
@@ -202,11 +295,18 @@ impl McuChannel {
     }
 
     fn uart_drain(&mut self, reg: &Registry) {
-        let fd = match self.fd { Some(f) => f, None => return };
-        if self.txbuf.is_empty() { return; }
+        let fd = match self.fd {
+            Some(f) => f,
+            None => return,
+        };
+        if self.txbuf.is_empty() {
+            return;
+        }
         match write_nonblock(fd, &self.txbuf) {
             Ok(0) => {}
-            Ok(n) => { self.txbuf.drain(..n); }
+            Ok(n) => {
+                self.txbuf.drain(..n);
+            }
             Err(e) => {
                 log(&format!("MCU ch{}: UART write error: {}", self.ch_id, e));
                 self.txbuf.clear();
@@ -216,8 +316,13 @@ impl McuChannel {
     }
 
     fn transition(&mut self, new_state: McuState, txq: &mut TxQueue) {
-        if new_state == self.state { return; }
-        log(&format!("MCU ch{}: {:?} -> {:?}", self.ch_id, self.state, new_state));
+        if new_state == self.state {
+            return;
+        }
+        log(&format!(
+            "MCU ch{}: {:?} -> {:?}",
+            self.ch_id, self.state, new_state
+        ));
         self.state = new_state;
         match new_state {
             McuState::Resetting => {
@@ -242,14 +347,17 @@ impl Channel for McuChannel {
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], _txq: &mut TxQueue, reg: &Registry) {
         if ftype == F_DATA {
-            if self.fd.is_none() || self.state != McuState::Active { return; }
+            if self.fd.is_none() || self.state != McuState::Active {
+                return;
+            }
             self.txbuf.extend_from_slice(payload);
             self.uart_drain(reg);
         }
     }
 
     fn on_link_connect(&mut self, txq: &mut TxQueue, _reg: &Registry) {
-        self.link_up = true;
+        self.link_up   = true;
+        self.last_rx   = Some(Instant::now());
         if self.state == McuState::Active {
             txq.enqueue(&build_frame(F_READY, self.ch_id, b""));
         } else {
@@ -281,15 +389,23 @@ impl Channel for McuChannel {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
-        if self.fd.is_none() { return self.reopen_at; }
+        if self.fd.is_none() {
+            return self.reopen_at;
+        }
         if self.state == McuState::Active {
             return self.last_rx.map(|t| t + RESET_SILENCE);
         }
         None
     }
 
-    fn handle_event(&mut self, _token: Token, readable: bool, writable: bool,
-                    txq: &mut TxQueue, reg: &Registry) {
+    fn handle_event(
+        &mut self,
+        _token:   Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
         if readable { self.uart_read(txq, reg); }
         if writable { self.uart_drain(reg); }
     }
@@ -297,33 +413,53 @@ impl Channel for McuChannel {
     fn close(&mut self, reg: &Registry) { self.close_uart(reg); }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
-        if !self.bp_paused { self.bp_paused = true; self.update_interest(reg); }
+        if !self.bp_paused {
+            self.bp_paused = true;
+            self.update_interest(reg);
+        }
     }
+
     fn resume_source_reads(&mut self, reg: &Registry) {
-        if self.bp_paused { self.bp_paused = false; self.update_interest(reg); }
+        if self.bp_paused {
+            self.bp_paused = false;
+            self.update_interest(reg);
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// PtyChannel  (host side: link → PTY ← Klipper)
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
+// PtyChannel  (host side: PTY ↔ F_DATA frames)
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// Host-side MCU channel.
+///
+/// Opens a PTY pair and exposes the slave via a well-known symlink so Klipper
+/// can connect with `serial: /tmp/klipper_mcu`.  Forwards PTY master reads as
+/// `F_DATA` frames and writes incoming `F_DATA` payloads to the master.
+///
+/// The PTY is opened on receipt of `F_READY` and closed on `F_FLUSH` or link
+/// disconnect.
 pub struct PtyChannel {
-    ch_id: u8,
-    symlink: String,
-    baud: u32,
-    master_fd: Option<RawFd>,
-    slave_fd:  Option<RawFd>,
-    master_in_sel: bool,
-    txbuf: Vec<u8>,
-    bp_paused: bool,
+    ch_id:          u8,
+    symlink:        String,
+    baud:           u32,
+    master_fd:      Option<RawFd>,
+    slave_fd:       Option<RawFd>,
+    master_in_sel:  bool,
+    /// Bytes to write to the PTY master (from the link).
+    txbuf:          Vec<u8>,
+    bp_paused:      bool,
 }
 
 impl PtyChannel {
+    /// Create a new PTY channel.  The symlink is removed if it already exists.
     pub fn new(ch_id: u8, symlink: String, baud: u32) -> Self {
         let ch = PtyChannel {
-            ch_id, symlink, baud,
-            master_fd: None, slave_fd: None,
+            ch_id,
+            symlink,
+            baud,
+            master_fd: None,
+            slave_fd: None,
             master_in_sel: false,
             txbuf: Vec::new(),
             bp_paused: false,
@@ -333,32 +469,42 @@ impl PtyChannel {
     }
 
     fn open_pty(&mut self, reg: &Registry) {
-        if self.master_fd.is_some() { return; }
+        if self.master_fd.is_some() {
+            return;
+        }
         match open_pty_raw(self.baud) {
-            Ok((master, slave)) => {
-                match pty_slave_name(slave) {
-                    Ok(slave_path) => {
-                        self.remove_symlink();
-                        if let Err(e) = std::os::unix::fs::symlink(&slave_path, &self.symlink) {
-                            log(&format!("PTY ch{}: symlink failed: {}", self.ch_id, e));
-                            close_fd(master); close_fd(slave);
-                            return;
-                        }
-                        self.master_fd = Some(master);
-                        self.slave_fd  = Some(slave);
-                        self.master_in_sel = false;
-                        self.update_interest(reg);
-                        log(&format!("PTY ch{}: opened {} -> {}",
-                                     self.ch_id,
-                                     slave_path.display(),
-                                     self.symlink));
+            Ok((master, slave)) => match pty_slave_name(slave) {
+                Ok(slave_path) => {
+                    self.remove_symlink();
+                    if let Err(e) = std::os::unix::fs::symlink(&slave_path, &self.symlink) {
+                        log(&format!(
+                            "PTY ch{}: symlink {} -> {} failed: {}",
+                            self.ch_id,
+                            slave_path.display(),
+                            self.symlink,
+                            e
+                        ));
+                        close_raw(master);
+                        close_raw(slave);
+                        return;
                     }
-                    Err(e) => {
-                        log(&format!("PTY ch{}: ttyname failed: {}", self.ch_id, e));
-                        close_fd(master); close_fd(slave);
-                    }
+                    self.master_fd     = Some(master);
+                    self.slave_fd      = Some(slave);
+                    self.master_in_sel = false;
+                    self.update_interest(reg);
+                    log(&format!(
+                        "PTY ch{}: opened {} -> {}",
+                        self.ch_id,
+                        slave_path.display(),
+                        self.symlink
+                    ));
                 }
-            }
+                Err(e) => {
+                    log(&format!("PTY ch{}: ttyname failed: {}", self.ch_id, e));
+                    close_raw(master);
+                    close_raw(slave);
+                }
+            },
             Err(e) => {
                 log(&format!("PTY ch{}: openpty failed: {}", self.ch_id, e));
             }
@@ -367,10 +513,14 @@ impl PtyChannel {
 
     fn close_pty(&mut self, reg: &Registry) {
         if let Some(fd) = self.master_fd.take() {
-            if self.master_in_sel { reg_del(reg, fd); }
-            close_fd(fd);
+            if self.master_in_sel {
+                reg_del(reg, fd);
+            }
+            close_raw(fd);
         }
-        if let Some(fd) = self.slave_fd.take() { close_fd(fd); }
+        if let Some(fd) = self.slave_fd.take() {
+            close_raw(fd);
+        }
         self.master_in_sel = false;
         self.txbuf.clear();
         self.remove_symlink();
@@ -382,23 +532,32 @@ impl PtyChannel {
     }
 
     fn update_interest(&mut self, reg: &Registry) {
-        let fd = match self.master_fd { Some(f) => f, None => return };
+        let fd = match self.master_fd {
+            Some(f) => f,
+            None => return,
+        };
         let mut interest = if self.bp_paused { None } else { Some(Interest::READABLE) };
         if !self.txbuf.is_empty() {
-            interest = Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
+            interest =
+                Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
         }
         let token = primary_token(self.ch_id);
         match (interest, self.master_in_sel) {
-            (None, true)  => { reg_del(reg, fd); self.master_in_sel = false; }
-            (None, false) => {}
+            (None, true)     => { reg_del(reg, fd); self.master_in_sel = false; }
+            (None, false)    => {}
             (Some(i), false) => { reg_add(reg, fd, token, i); self.master_in_sel = true; }
             (Some(i), true)  => { reg_mod(reg, fd, token, i); }
         }
     }
 
     fn pty_drain(&mut self, reg: &Registry) {
-        let fd = match self.master_fd { Some(f) => f, None => return };
-        if self.txbuf.is_empty() { return; }
+        let fd = match self.master_fd {
+            Some(f) => f,
+            None => return,
+        };
+        if self.txbuf.is_empty() {
+            return;
+        }
         match write_nonblock(fd, &self.txbuf) {
             Ok(0) => {}
             Ok(n) => { self.txbuf.drain(..n); }
@@ -434,8 +593,8 @@ impl Channel for PtyChannel {
         }
     }
 
+    /// Stay closed until the exporter sends `F_READY`.
     fn on_link_connect(&mut self, _txq: &mut TxQueue, reg: &Registry) {
-        // Stay closed; wait for exporter to send READY
         self.close_pty(reg);
     }
 
@@ -447,95 +606,140 @@ impl Channel for PtyChannel {
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
     fn next_deadline(&self) -> Option<Instant> { None }
 
-    fn handle_event(&mut self, _token: Token, readable: bool, writable: bool,
-                    txq: &mut TxQueue, reg: &Registry) {
+    fn handle_event(
+        &mut self,
+        _token:   Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
         if readable {
-            let fd = match self.master_fd { Some(f) => f, None => return };
+            let fd = match self.master_fd {
+                Some(f) => f,
+                None => return,
+            };
             let mut buf = [0u8; 4096];
             match read_nonblock(fd, &mut buf) {
                 Ok(Some(n)) if n > 0 => {
                     txq.enqueue(&build_frame(F_DATA, self.ch_id, &buf[..n]));
                 }
-                Err(_) => {}
+                Err(e) => {
+                    // EIO = all slave fds closed (Klipper disconnected).
+                    if e.raw_os_error().map_or(false, |c| c == libc::EIO) {
+                        self.close_pty(reg);
+                    }
+                }
                 _ => {}
             }
         }
-        if writable { self.pty_drain(reg); }
+        if writable {
+            self.pty_drain(reg);
+        }
     }
 
     fn close(&mut self, reg: &Registry) { self.close_pty(reg); }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
-        if !self.bp_paused { self.bp_paused = true; self.update_interest(reg); }
+        if !self.bp_paused {
+            self.bp_paused = true;
+            self.update_interest(reg);
+        }
     }
+
     fn resume_source_reads(&mut self, reg: &Registry) {
-        if self.bp_paused { self.bp_paused = false; self.update_interest(reg); }
+        if self.bp_paused {
+            self.bp_paused = false;
+            self.update_interest(reg);
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // TCP helpers
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// Wire connection-id helpers.
 fn pack_cid(cid: u16) -> [u8; 2] { cid.to_le_bytes() }
 
 fn unpack_cid(payload: &[u8]) -> Option<(u16, &[u8])> {
-    if payload.len() < 2 { return None; }
-    let cid = u16::from_le_bytes([payload[0], payload[1]]);
-    Some((cid, &payload[2..]))
+    if payload.len() < 2 {
+        return None;
+    }
+    Some((u16::from_le_bytes([payload[0], payload[1]]), &payload[2..]))
 }
 
-struct TcpConn {
-    stream: mio::net::TcpStream,
-    txbuf: Vec<u8>,
-    connecting: bool,
-    in_sel: bool,
-}
-
+/// Per-connection buffer limit.  Matches the C `CONN_HIGH_WATER` constant.
 const CONN_HIGH_WATER: usize = 256 * 1024;
 
-// ---------------------------------------------------------------------------
-// TcpSourceChannel  (exporter side: accept local connections → tunnel to host)
-// ---------------------------------------------------------------------------
+/// State for a single TCP connection slot.
+struct TcpConn {
+    stream:        mio::net::TcpStream,
+    /// Bytes waiting to be written to the stream.
+    txbuf:         Vec<u8>,
+    /// Async connect in progress.
+    connecting:    bool,
+    /// Registered with mio.
+    in_sel:        bool,
+    /// Peer sent F_TCLOSE; drain `txbuf` then close without sending F_TCLOSE back.
+    close_pending: bool,
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// TcpSourceChannel  (exporter side: accept local conns → tunnel to host)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Exporter-side TCP channel.
+///
+/// Listens on a local address and forwards accepted connections to the host as
+/// `F_TCONN` / `F_TDATA` / `F_TCLOSE` frames.  The connection-id is a slot
+/// index 0..`MAX_TCP_CONNS` — this matches the C `cid` field and is identical
+/// on the wire.
 pub struct TcpSourceChannel {
-    ch_id: u8,
+    ch_id:    u8,
     listener: mio::net::TcpListener,
-    conns: HashMap<usize, TcpConn>,  // slot → conn
-    by_ptr: HashMap<usize, usize>,   // stream ptr → slot (for reverse lookup)
+    /// Connection slots.  `None` = empty.
+    conns:    Vec<Option<TcpConn>>,
     next_slot: usize,
-    link_up: bool,
+    link_up:   bool,
     bp_paused: bool,
 }
 
 impl TcpSourceChannel {
-    pub fn new(ch_id: u8, bind_addr: &str, bind_port: u16, reg: &Registry)
-        -> std::io::Result<Self>
-    {
-        let addr = format!("{}:{}", bind_addr, bind_port).parse()
+    /// Create a new source channel that listens on `bind_addr:bind_port`.
+    pub fn new(
+        ch_id:      u8,
+        bind_addr:  &str,
+        bind_port:  u16,
+        reg:        &Registry,
+    ) -> std::io::Result<Self> {
+        let addr = format!("{}:{}", bind_addr, bind_port)
+            .parse()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput,
                                               format!("bad addr: {}", e)))?;
         let mut listener = mio::net::TcpListener::bind(addr)?;
         reg.register(&mut listener, primary_token(ch_id), Interest::READABLE)?;
         log(&format!("TCP src ch{}: listening {}:{}", ch_id, bind_addr, bind_port));
         Ok(TcpSourceChannel {
-            ch_id, listener,
-            conns: HashMap::new(), by_ptr: HashMap::new(),
-            next_slot: 0, link_up: false, bp_paused: false,
+            ch_id,
+            listener,
+            conns:     (0..MAX_TCP_CONNS).map(|_| None).collect(),
+            next_slot: 0,
+            link_up:   false,
+            bp_paused: false,
         })
     }
 
+    /// Find the next free slot using round-robin allocation.
     fn alloc_slot(&mut self) -> Option<usize> {
-        for _ in 0..TCP_SLOTS {
-            let s = self.next_slot % TCP_SLOTS;
+        for _ in 0..MAX_TCP_CONNS {
+            let s = self.next_slot % MAX_TCP_CONNS;
             self.next_slot += 1;
-            if !self.conns.contains_key(&s) { return Some(s); }
+            if self.conns[s].is_none() {
+                return Some(s);
+            }
         }
         None
-    }
-
-    fn stream_ptr(stream: &mio::net::TcpStream) -> usize {
-        stream as *const _ as usize
     }
 
     fn accept(&mut self, txq: &mut TxQueue, reg: &Registry) {
@@ -550,25 +754,43 @@ impl TcpSourceChannel {
                     let slot = match self.alloc_slot() {
                         Some(s) => s,
                         None => {
-                            log(&format!("TCP src ch{}: slot pool exhausted", self.ch_id));
+                            log(&format!(
+                                "TCP src ch{}: slot pool exhausted",
+                                self.ch_id
+                            ));
                             drop(stream);
                             continue;
                         }
                     };
                     let token = tcp_slot_token(self.ch_id, slot);
-                    if let Err(e) = reg.register(&mut stream, token,
-                                                  Interest::READABLE | Interest::WRITABLE) {
-                        log(&format!("TCP src ch{}: register error: {}", self.ch_id, e));
+                    if let Err(e) = reg.register(
+                        &mut stream,
+                        token,
+                        Interest::READABLE | Interest::WRITABLE,
+                    ) {
+                        log(&format!(
+                            "TCP src ch{}: register error: {}",
+                            self.ch_id, e
+                        ));
                         drop(stream);
                         continue;
                     }
-                    let ptr = Self::stream_ptr(&stream);
-                    log(&format!("TCP src ch{}: accepted {} slot={}", self.ch_id, addr, slot));
-                    self.by_ptr.insert(ptr, slot);
-                    self.conns.insert(slot, TcpConn {
-                        stream, txbuf: Vec::new(), connecting: false, in_sel: true,
+                    log(&format!(
+                        "TCP src ch{}: accepted {} slot={}",
+                        self.ch_id, addr, slot
+                    ));
+                    self.conns[slot] = Some(TcpConn {
+                        stream,
+                        txbuf:         Vec::new(),
+                        connecting:    false,
+                        in_sel:        true,
+                        close_pending: false,
                     });
-                    txq.enqueue(&build_frame(F_TCONN, self.ch_id, &pack_cid(slot as u16)));
+                    txq.enqueue(&build_frame(
+                        F_TCONN,
+                        self.ch_id,
+                        &pack_cid(slot as u16),
+                    ));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -579,15 +801,27 @@ impl TcpSourceChannel {
         }
     }
 
-    fn tcp_event(&mut self, token: Token, readable: bool, writable: bool,
-                 txq: &mut TxQueue, reg: &Registry)
-    {
-        let slot = (token.0 - TCP_TOKEN_BASE) % TCP_SLOTS;
+    fn tcp_event(
+        &mut self,
+        token:    Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
+        let slot = (token.0 - TCP_BASE) % MAX_TCP_CONNS;
+
+        // ── Readable ──────────────────────────────────────────────────────
         if readable {
             let mut buf = [0u8; 65536];
             loop {
-                let (read_result, n) = {
-                    let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
+                // Skip reads when close_pending; peer said goodbye.
+                let (eof, n) = {
+                    let conn = match self.conns[slot].as_mut() {
+                        Some(c) => c,
+                        None => return,
+                    };
+                    if conn.close_pending { break; }
                     use std::io::Read;
                     match conn.stream.read(&mut buf) {
                         Ok(0) => (true, 0),
@@ -595,23 +829,31 @@ impl TcpSourceChannel {
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(_) => (true, 0),
                     }
-                }; // conn borrow dropped
-                if read_result { self.close_slot(slot, true, txq, reg); return; }
+                };
+                if eof {
+                    self.close_slot(slot, true, txq, reg);
+                    return;
+                }
+                // Chunk into MAX_PAYLOAD-2 byte frames (2 bytes reserved for cid).
                 let mut off = 0;
                 while off < n {
                     let end = std::cmp::min(off + MAX_PAYLOAD - 2, n);
-                    let chunk = &buf[off..end];
-                    let mut payload = Vec::with_capacity(2 + chunk.len());
+                    let mut payload = Vec::with_capacity(2 + end - off);
                     payload.extend_from_slice(&pack_cid(slot as u16));
-                    payload.extend_from_slice(chunk);
+                    payload.extend_from_slice(&buf[off..end]);
                     txq.enqueue(&build_frame(F_TDATA, self.ch_id, &payload));
                     off = end;
                 }
             }
         }
+
+        // ── Writable ──────────────────────────────────────────────────────
         if writable {
             let write_err = {
-                let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
+                let conn = match self.conns[slot].as_mut() {
+                    Some(c) => c,
+                    None => return,
+                };
                 if !conn.txbuf.is_empty() {
                     use std::io::Write;
                     match conn.stream.write(&conn.txbuf) {
@@ -620,41 +862,59 @@ impl TcpSourceChannel {
                         Err(_) => true,
                     }
                 } else { false }
-            }; // conn borrow dropped
-            if write_err { self.close_slot(slot, true, txq, reg); return; }
-            // Copy scalar fields before taking the conn borrow so the borrow
-            // checker sees distinct borrows (ch_id, bp_paused are Copy).
-            let ch_id = self.ch_id;
-            let bp_paused = self.bp_paused;
-            if let Some(conn) = self.conns.get_mut(&slot) {
-                update_src_conn_interest(ch_id, bp_paused, slot, conn, reg);
+            };
+            if write_err {
+                self.close_slot(slot, true, txq, reg);
+                return;
             }
+            // If close_pending and txbuf fully drained, close without notify.
+            {
+                let conn = match self.conns[slot].as_mut() {
+                    Some(c) => c,
+                    None => return,
+                };
+                if conn.txbuf.is_empty() && conn.close_pending {
+                    let _ = conn; // end borrow before calling close_slot
+                    self.close_slot(slot, false, txq, reg);
+                    return;
+                }
+            }
+            self.update_conn_interest(slot, reg);
         }
     }
 
     fn update_conn_interest(&mut self, slot: usize, reg: &Registry) {
-        let ch_id = self.ch_id;
+        let ch_id     = self.ch_id;
         let bp_paused = self.bp_paused;
-        if let Some(conn) = self.conns.get_mut(&slot) {
-            update_src_conn_interest(ch_id, bp_paused, slot, conn, reg);
+        if let Some(conn) = self.conns[slot].as_mut() {
+            src_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
         }
     }
 
-    fn close_slot(&mut self, slot: usize, notify: bool, txq: &mut TxQueue, reg: &Registry) {
-        if let Some(mut conn) = self.conns.remove(&slot) {
-            let ptr = Self::stream_ptr(&conn.stream);
-            self.by_ptr.remove(&ptr);
+    fn close_slot(
+        &mut self,
+        slot:   usize,
+        notify: bool,
+        txq:    &mut TxQueue,
+        reg:    &Registry,
+    ) {
+        if let Some(mut conn) = self.conns[slot].take() {
             let _ = reg.deregister(&mut conn.stream);
             if notify && self.link_up {
-                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
+                txq.enqueue(&build_frame(
+                    F_TCLOSE,
+                    self.ch_id,
+                    &pack_cid(slot as u16),
+                ));
             }
             log(&format!("TCP src ch{}: closed slot={}", self.ch_id, slot));
         }
     }
 
     fn close_all(&mut self, txq: &mut TxQueue, reg: &Registry) {
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        for slot in slots { self.close_slot(slot, false, txq, reg); }
+        for slot in 0..MAX_TCP_CONNS {
+            self.close_slot(slot, false, txq, reg);
+        }
     }
 }
 
@@ -662,40 +922,71 @@ impl Channel for TcpSourceChannel {
     fn channel_id(&self) -> u8 { self.ch_id }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], txq: &mut TxQueue, reg: &Registry) {
-        let (cid, data) = match unpack_cid(payload) { Some(x) => x, None => return };
+        let (cid, data) = match unpack_cid(payload) {
+            Some(x) => x,
+            None => return,
+        };
         let slot = cid as usize;
+        if slot >= MAX_TCP_CONNS { return; }
+
         match ftype {
             F_TDATA => {
-                if let Some(conn) = self.conns.get_mut(&slot) {
-                    conn.txbuf.extend_from_slice(data);
-                    if conn.txbuf.len() > CONN_HIGH_WATER {
-                        log(&format!("TCP src ch{}: slot={} high-water", self.ch_id, slot));
+                if let Some(conn) = self.conns[slot].as_mut() {
+                    if data.is_empty() { return; }
+                    let avail = CONN_HIGH_WATER + MAX_PAYLOAD - conn.txbuf.len();
+                    if data.len() > avail || conn.txbuf.len() > CONN_HIGH_WATER {
+                        log(&format!(
+                            "TCP src ch{}: slot={} high-water -- closing",
+                            self.ch_id, slot
+                        ));
+                        let _ = conn; // end borrow before calling close_slot
                         self.close_slot(slot, true, txq, reg);
                     } else {
+                        conn.txbuf.extend_from_slice(data);
+                        let _ = conn;
                         self.update_conn_interest(slot, reg);
                     }
                 }
             }
-            F_TCLOSE => { self.close_slot(slot, false, txq, reg); }
+            F_TCLOSE => {
+                if let Some(conn) = self.conns[slot].as_mut() {
+                    if conn.txbuf.is_empty() {
+                        // Nothing pending — close immediately without notify.
+                        let _ = conn;
+                        self.close_slot(slot, false, txq, reg);
+                    } else {
+                        // Drain first, then close.
+                        conn.close_pending = true;
+                        let _ = conn;
+                        self.update_conn_interest(slot, reg);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    fn on_link_connect(&mut self, _txq: &mut TxQueue, _reg: &Registry) { self.link_up = true; }
+    fn on_link_connect(&mut self, _txq: &mut TxQueue, _reg: &Registry) {
+        self.link_up = true;
+    }
 
     fn on_link_disconnect(&mut self, reg: &Registry) {
         self.link_up = false;
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        // Use a local dummy TxQueue – no point sending TCLOSE frames when link is down
         let mut dummy = TxQueue::new();
-        for slot in slots { self.close_slot(slot, false, &mut dummy, reg); }
+        self.close_all(&mut dummy, reg);
     }
 
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
     fn next_deadline(&self) -> Option<Instant> { None }
 
-    fn handle_event(&mut self, token: Token, readable: bool, writable: bool,
-                    txq: &mut TxQueue, reg: &Registry) {
+    fn handle_event(
+        &mut self,
+        token:    Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
         if token == primary_token(self.ch_id) {
             if readable { self.accept(txq, reg); }
         } else {
@@ -712,53 +1003,73 @@ impl Channel for TcpSourceChannel {
     fn pause_source_reads(&mut self, reg: &Registry) {
         if self.bp_paused { return; }
         self.bp_paused = true;
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        for slot in slots { self.update_conn_interest(slot, reg); }
+        for slot in 0..MAX_TCP_CONNS {
+            self.update_conn_interest(slot, reg);
+        }
     }
 
     fn resume_source_reads(&mut self, reg: &Registry) {
         if !self.bp_paused { return; }
         self.bp_paused = false;
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        for slot in slots { self.update_conn_interest(slot, reg); }
+        for slot in 0..MAX_TCP_CONNS {
+            self.update_conn_interest(slot, reg);
+        }
     }
 }
 
-// ---------------------------------------------------------------------------
-// Free helper: update mio interest for a single TcpSourceChannel connection
-// ---------------------------------------------------------------------------
-
-fn update_src_conn_interest(ch_id: u8, bp_paused: bool, slot: usize,
-                             conn: &mut TcpConn, reg: &Registry) {
-    let interest = if conn.txbuf.is_empty() {
-        if !bp_paused { Interest::READABLE } else { return; }
-    } else if bp_paused {
-        Interest::WRITABLE
-    } else {
-        Interest::READABLE | Interest::WRITABLE
+/// Update mio interest for one `TcpSourceChannel` connection slot.
+///
+/// Matches the C `tcp_conn_update()` logic:
+/// - reads are suspended when backpressured **or** when `close_pending` is set
+///   (no point reading when we will close after the final write)
+/// - writes are requested whenever `txbuf` is non-empty
+fn src_conn_update_interest(
+    ch_id:     u8,
+    bp_paused: bool,
+    slot:      usize,
+    conn:      &mut TcpConn,
+    reg:       &Registry,
+) {
+    if !conn.in_sel { return; }
+    // Pause reads when backpressured or when waiting to drain before close.
+    let want_read  = !(bp_paused || conn.close_pending);
+    let want_write = !conn.txbuf.is_empty();
+    let interest = match (want_read, want_write) {
+        (true,  true)  => Interest::READABLE | Interest::WRITABLE,
+        (true,  false) => Interest::READABLE,
+        (false, true)  => Interest::WRITABLE,
+        (false, false) => return,  // deregister to avoid spurious wakeups
     };
-    if conn.in_sel {
-        let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
-    }
+    let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
 }
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // TcpDestChannel  (host side: tunnel ← host → local service)
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// Host-side TCP channel.
+///
+/// On receipt of `F_TCONN` it opens an async connection to the configured
+/// destination address.  Data is forwarded bidirectionally until one side
+/// sends `F_TCLOSE`.
 pub struct TcpDestChannel {
-    ch_id: u8,
+    ch_id:     u8,
     dest_addr: String,
     dest_port: u16,
-    conns: HashMap<usize, TcpConn>,  // slot → conn
+    /// Connection slots.  `None` = empty.
+    conns:     Vec<Option<TcpConn>>,
     bp_paused: bool,
 }
 
 impl TcpDestChannel {
+    /// Create a new destination channel.  Connections are opened lazily on
+    /// `F_TCONN` frames.
     pub fn new(ch_id: u8, dest_addr: String, dest_port: u16) -> Self {
         TcpDestChannel {
-            ch_id, dest_addr, dest_port,
-            conns: HashMap::new(),
+            ch_id,
+            dest_addr,
+            dest_port,
+            conns:     (0..MAX_TCP_CONNS).map(|_| None).collect(),
             bp_paused: false,
         }
     }
@@ -768,78 +1079,142 @@ impl TcpDestChannel {
         let addr: std::net::SocketAddr = match addr_str.parse() {
             Ok(a) => a,
             Err(_) => {
-                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
+                txq.enqueue(&build_frame(
+                    F_TCLOSE,
+                    self.ch_id,
+                    &pack_cid(slot as u16),
+                ));
                 return;
             }
         };
         let mut stream = match mio::net::TcpStream::connect(addr) {
             Ok(s) => s,
             Err(e) => {
-                log(&format!("TCP dst ch{}: connect slot={} failed: {}", self.ch_id, slot, e));
-                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
+                log(&format!(
+                    "TCP dst ch{}: connect slot={} failed: {}",
+                    self.ch_id, slot, e
+                ));
+                txq.enqueue(&build_frame(
+                    F_TCLOSE,
+                    self.ch_id,
+                    &pack_cid(slot as u16),
+                ));
                 return;
             }
         };
         let _ = stream.set_nodelay(true);
         let token = tcp_slot_token(self.ch_id, slot);
         if let Err(e) = reg.register(&mut stream, token,
-                                      Interest::READABLE | Interest::WRITABLE) {
-            log(&format!("TCP dst ch{}: register error slot={}: {}", self.ch_id, slot, e));
-            txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
+                                     Interest::READABLE | Interest::WRITABLE) {
+            log(&format!(
+                "TCP dst ch{}: register error slot={}: {}",
+                self.ch_id, slot, e
+            ));
+            txq.enqueue(&build_frame(
+                F_TCLOSE,
+                self.ch_id,
+                &pack_cid(slot as u16),
+            ));
             return;
         }
-        log(&format!("TCP dst ch{}: connecting slot={} -> {}:{}",
-                     self.ch_id, slot, self.dest_addr, self.dest_port));
-        self.conns.insert(slot, TcpConn { stream, txbuf: Vec::new(), connecting: true, in_sel: true });
+        log(&format!(
+            "TCP dst ch{}: connecting slot={} -> {}:{}",
+            self.ch_id, slot, self.dest_addr, self.dest_port
+        ));
+        self.conns[slot] = Some(TcpConn {
+            stream,
+            txbuf:         Vec::new(),
+            connecting:    true,
+            in_sel:        true,
+            close_pending: false,
+        });
     }
 
-    fn tcp_event(&mut self, token: Token, readable: bool, writable: bool,
-                 txq: &mut TxQueue, reg: &Registry)
-    {
-        let slot = (token.0 - TCP_TOKEN_BASE) % TCP_SLOTS;
+    fn tcp_event(
+        &mut self,
+        token:    Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
+        let slot = (token.0 - TCP_BASE) % MAX_TCP_CONNS;
 
-        // Finalise async connect — use a scoped block to drop the conn borrow
-        // before potentially calling close_slot (which also needs &mut self).
+        // ── Finalise async connect ────────────────────────────────────────
         let connect_failed = {
-            let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
+            let conn = match self.conns[slot].as_mut() {
+                Some(c) => c,
+                None => return,
+            };
             if conn.connecting && writable {
                 match conn.stream.peer_addr() {
                     Ok(_) => {
                         conn.connecting = false;
-                        log(&format!("TCP dst ch{}: connected slot={}", self.ch_id, slot));
+                        log(&format!(
+                            "TCP dst ch{}: connected slot={}",
+                            self.ch_id, slot
+                        ));
                         false
                     }
                     Err(e) => {
-                        log(&format!("TCP dst ch{}: connect failed slot={}: {}",
-                                     self.ch_id, slot, e));
+                        log(&format!(
+                            "TCP dst ch{}: connect failed slot={}: {}",
+                            self.ch_id, slot, e
+                        ));
                         true
                     }
                 }
             } else { false }
-        }; // conn borrow dropped here
-        if connect_failed { self.close_slot(slot, true, txq, reg); return; }
+        };
+        if connect_failed {
+            self.close_slot(slot, true, txq, reg);
+            return;
+        }
 
-        // Write: scoped block to drop borrow before close_slot
-        let write_err = if writable {
-            let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
-            if !conn.connecting && !conn.txbuf.is_empty() {
-                use std::io::Write;
-                match conn.stream.write(&conn.txbuf) {
-                    Ok(n) => { conn.txbuf.drain(..n); false }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
-                    Err(_) => true,
+        // ── Writable ──────────────────────────────────────────────────────
+        if writable {
+            let write_err = {
+                let conn = match self.conns[slot].as_mut() {
+                    Some(c) => c,
+                    None => return,
+                };
+                if !conn.connecting && !conn.txbuf.is_empty() {
+                    use std::io::Write;
+                    match conn.stream.write(&conn.txbuf) {
+                        Ok(n) => { conn.txbuf.drain(..n); false }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+                        Err(_) => true,
+                    }
+                } else { false }
+            };
+            if write_err {
+                self.close_slot(slot, true, txq, reg);
+                return;
+            }
+            // close_pending: drain complete → close without sending F_TCLOSE.
+            {
+                let conn = match self.conns[slot].as_mut() {
+                    Some(c) => c,
+                    None => return,
+                };
+                if conn.txbuf.is_empty() && conn.close_pending {
+                        let _ = conn;
+                    self.close_slot(slot, false, txq, reg);
+                    return;
                 }
-            } else { false }
-        } else { false };
-        if write_err { self.close_slot(slot, true, txq, reg); return; }
+            }
+        }
 
-        // Read: scoped block per iteration to allow close_slot calls
+        // ── Readable ──────────────────────────────────────────────────────
         if readable {
             let mut buf = [0u8; 65536];
             loop {
-                let (read_result, n) = {
-                    let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
-                    if conn.connecting { break; }
+                let (eof, n) = {
+                    let conn = match self.conns[slot].as_mut() {
+                        Some(c) => c,
+                        None => return,
+                    };
+                    if conn.connecting || conn.close_pending { break; }
                     use std::io::Read;
                     match conn.stream.read(&mut buf) {
                         Ok(0) => (true, 0),
@@ -847,52 +1222,64 @@ impl TcpDestChannel {
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                         Err(_) => (true, 0),
                     }
-                }; // conn borrow dropped
-                if read_result { self.close_slot(slot, true, txq, reg); return; }
+                };
+                if eof {
+                    self.close_slot(slot, true, txq, reg);
+                    return;
+                }
                 let mut off = 0;
                 while off < n {
                     let end = std::cmp::min(off + MAX_PAYLOAD - 2, n);
-                    let chunk = &buf[off..end];
-                    let mut payload = Vec::with_capacity(2 + chunk.len());
+                    let mut payload = Vec::with_capacity(2 + end - off);
                     payload.extend_from_slice(&pack_cid(slot as u16));
-                    payload.extend_from_slice(chunk);
+                    payload.extend_from_slice(&buf[off..end]);
                     txq.enqueue(&build_frame(F_TDATA, self.ch_id, &payload));
                     off = end;
                 }
             }
         }
 
-        // Update interest
-        let ch_id = self.ch_id;
+        // ── Update interest ───────────────────────────────────────────────
+        let ch_id     = self.ch_id;
         let bp_paused = self.bp_paused;
-        let conn = match self.conns.get_mut(&slot) { Some(c) => c, None => return };
-        update_dst_conn_interest(ch_id, bp_paused, slot, conn, reg);
+        if let Some(conn) = self.conns[slot].as_mut() {
+            dst_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
+        }
     }
 
     fn update_conn_interest(&mut self, slot: usize, reg: &Registry) {
-        let ch_id = self.ch_id;
+        let ch_id     = self.ch_id;
         let bp_paused = self.bp_paused;
-        if let Some(conn) = self.conns.get_mut(&slot) {
-            update_dst_conn_interest(ch_id, bp_paused, slot, conn, reg);
+        if let Some(conn) = self.conns[slot].as_mut() {
+            dst_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
         }
     }
 
     fn update_conn_interest_all(&mut self, reg: &Registry) {
-        let ch_id = self.ch_id;
+        let ch_id     = self.ch_id;
         let bp_paused = self.bp_paused;
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        for slot in slots {
-            if let Some(conn) = self.conns.get_mut(&slot) {
-                update_dst_conn_interest(ch_id, bp_paused, slot, conn, reg);
+        for slot in 0..MAX_TCP_CONNS {
+            if let Some(conn) = self.conns[slot].as_mut() {
+                dst_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
             }
         }
     }
 
-    fn close_slot(&mut self, slot: usize, notify: bool, txq: &mut TxQueue, reg: &Registry) {
-        if let Some(mut conn) = self.conns.remove(&slot) {
+    fn close_slot(
+        &mut self,
+        slot:   usize,
+        notify: bool,
+        txq:    &mut TxQueue,
+        reg:    &Registry,
+    ) {
+        if let Some(mut conn) = self.conns[slot].take() {
             let _ = reg.deregister(&mut conn.stream);
             if notify {
-                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
+                txq.enqueue(&build_frame(
+                    F_TCLOSE,
+                    self.ch_id,
+                    &pack_cid(slot as u16),
+                ));
             }
             log(&format!("TCP dst ch{}: closed slot={}", self.ch_id, slot));
         }
@@ -903,46 +1290,88 @@ impl Channel for TcpDestChannel {
     fn channel_id(&self) -> u8 { self.ch_id }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], txq: &mut TxQueue, reg: &Registry) {
-        let (cid, data) = match unpack_cid(payload) { Some(x) => x, None => return };
+        let (cid, data) = match unpack_cid(payload) {
+            Some(x) => x,
+            None => return,
+        };
         let slot = cid as usize;
+        if slot >= MAX_TCP_CONNS { return; }
+
         match ftype {
-            F_TCONN => { if !self.conns.contains_key(&slot) { self.open_conn(slot, reg, txq); } }
+            F_TCONN => {
+                if self.conns[slot].is_none() {
+                    self.open_conn(slot, reg, txq);
+                }
+            }
             F_TDATA => {
-                if let Some(conn) = self.conns.get_mut(&slot) {
-                    conn.txbuf.extend_from_slice(data);
-                    if conn.txbuf.len() > CONN_HIGH_WATER {
-                        log(&format!("TCP dst ch{}: slot={} high-water", self.ch_id, slot));
+                if let Some(conn) = self.conns[slot].as_mut() {
+                    if data.is_empty() { return; }
+                    let avail = CONN_HIGH_WATER + MAX_PAYLOAD - conn.txbuf.len();
+                    if data.len() > avail || conn.txbuf.len() > CONN_HIGH_WATER {
+                        log(&format!(
+                            "TCP dst ch{}: slot={} high-water -- closing",
+                            self.ch_id, slot
+                        ));
+                        let _ = conn;
                         self.close_slot(slot, true, txq, reg);
                     } else {
+                        conn.txbuf.extend_from_slice(data);
+                        let _ = conn;
                         self.update_conn_interest(slot, reg);
                     }
                 }
             }
-            F_TCLOSE => { self.close_slot(slot, false, txq, reg); }
+            F_TCLOSE => {
+                if let Some(conn) = self.conns[slot].as_mut() {
+                    if conn.txbuf.is_empty() {
+                        let _ = conn;
+                        self.close_slot(slot, false, txq, reg);
+                    } else {
+                        conn.close_pending = true;
+                        let _ = conn;
+                        self.update_conn_interest(slot, reg);
+                    }
+                }
+            }
             _ => {}
         }
     }
 
-    fn on_link_connect(&mut self, _txq: &mut TxQueue, _reg: &Registry) {}
+    /// Close any connections left open from a previous session, matching the
+    /// C `ch_on_link_up` → `ch_on_link_down` call for `CH_TCP_DST`.
+    fn on_link_connect(&mut self, _txq: &mut TxQueue, reg: &Registry) {
+        let mut dummy = TxQueue::new();
+        for slot in 0..MAX_TCP_CONNS {
+            self.close_slot(slot, false, &mut dummy, reg);
+        }
+    }
 
     fn on_link_disconnect(&mut self, reg: &Registry) {
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
         let mut dummy = TxQueue::new();
-        for slot in slots { self.close_slot(slot, false, &mut dummy, reg); }
+        for slot in 0..MAX_TCP_CONNS {
+            self.close_slot(slot, false, &mut dummy, reg);
+        }
     }
 
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
     fn next_deadline(&self) -> Option<Instant> { None }
 
-    fn handle_event(&mut self, token: Token, readable: bool, writable: bool,
-                    txq: &mut TxQueue, reg: &Registry) {
+    fn handle_event(
+        &mut self,
+        token:    Token,
+        readable: bool,
+        writable: bool,
+        txq:      &mut TxQueue,
+        reg:      &Registry,
+    ) {
         self.tcp_event(token, readable, writable, txq, reg);
     }
 
     fn close(&mut self, reg: &Registry) {
         let mut dummy = TxQueue::new();
-        let slots: Vec<usize> = self.conns.keys().copied().collect();
-        for slot in slots { self.close_slot(slot, false, &mut dummy, reg); }
+        for slot in 0..MAX_TCP_CONNS {
+            self.close_slot(slot, false, &mut dummy, reg);
+        }
     }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
@@ -958,20 +1387,26 @@ impl Channel for TcpDestChannel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Free helper: update mio interest for a single TcpDestChannel connection
-// ---------------------------------------------------------------------------
-
-fn update_dst_conn_interest(ch_id: u8, bp_paused: bool, slot: usize,
-                             conn: &mut TcpConn, reg: &Registry) {
-    let needs_write = !conn.txbuf.is_empty() || conn.connecting;
-    let interest = match (bp_paused, needs_write) {
-        (false, false) => Interest::READABLE,
-        (false, true)  => Interest::READABLE | Interest::WRITABLE,
-        (true,  true)  => Interest::WRITABLE,
-        (true,  false) => return,
+/// Update mio interest for one `TcpDestChannel` connection slot.
+///
+/// Matches the C `tcp_conn_update()` logic:
+/// reads are paused when backpressured or `close_pending`; writes are
+/// requested when `txbuf` is non-empty or an async connect is in progress.
+fn dst_conn_update_interest(
+    ch_id:     u8,
+    bp_paused: bool,
+    slot:      usize,
+    conn:      &mut TcpConn,
+    reg:       &Registry,
+) {
+    if !conn.in_sel { return; }
+    let want_write = !conn.txbuf.is_empty() || conn.connecting;
+    let want_read  = !(bp_paused || conn.close_pending);
+    let interest = match (want_read, want_write) {
+        (true,  true)  => Interest::READABLE | Interest::WRITABLE,
+        (true,  false) => Interest::READABLE,
+        (false, true)  => Interest::WRITABLE,
+        (false, false) => return,
     };
-    if conn.in_sel {
-        let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
-    }
+    let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
 }

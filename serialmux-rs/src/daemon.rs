@@ -1,3 +1,16 @@
+//! Event-loop daemon.
+//!
+//! [`Daemon`] owns the link fd, all channels, and the TX queue.  It runs a
+//! single-threaded `mio` event loop that:
+//!
+//! 1. Resolves and opens the link device (CDC ACM or a fixed path).
+//! 2. Performs the `F_HELLO` / `F_ACK` handshake.
+//! 3. Routes incoming frames to the appropriate channel.
+//! 4. Reads channel I/O events and enqueues `F_*` frames for the link.
+//! 5. Applies backpressure (pause / resume channel reads at the high/low
+//!    water marks of the TX queue).
+//! 6. Sends keepalive `F_PING` frames and times out a silent link.
+
 use std::collections::HashMap;
 use std::os::unix::io::RawFd;
 use std::time::{Duration, Instant};
@@ -8,75 +21,87 @@ use mio::{Events, Interest, Poll};
 use crate::channel::{channel_id_for_token, Channel, TOKEN_LINK};
 use crate::protocol::{
     build_frame, FrameParser, TxQueue, F_ACK, F_DATA, F_HELLO, F_PING, F_PONG, F_TDATA,
+    LINK_HIGH_WATER, LINK_LOW_WATER,
 };
-use crate::serial::{find_acm_by_usb_id, log, open_serial_fd, read_nonblock};
+use crate::serial::{close_raw, find_acm_by_usb_id, log, open_serial_fd, read_nonblock};
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Tuning constants
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
-const MAX_TICK:        Duration = Duration::from_secs(1);
-const KA_INTERVAL:     Duration = Duration::from_secs(3);
-const KA_TIMEOUT:      Duration = Duration::from_secs(10);
-const LINK_HIGH_WATER: usize    = 512 * 1024;
-const LINK_LOW_WATER:  usize    = 256 * 1024;
+/// Maximum time to block in `poll()` before running timers.
+const MAX_TICK:    Duration = Duration::from_secs(1);
+/// Send a `F_PING` after this much idle TX time.
+const KA_INTERVAL: Duration = Duration::from_secs(3);
+/// Drop the link if no bytes arrive within this window.
+const KA_TIMEOUT:  Duration = Duration::from_secs(10);
 
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 // Daemon
-// ---------------------------------------------------------------------------
+// ─────────────────────────────────────────────────────────────────────────────
 
+/// Central event-loop state.
 pub struct Daemon {
+    /// `"exporter"` or `"host"` — used for logging.
     mode:     String,
+    /// Fixed device path (mutually exclusive with `usb_id`).
     link_dev: Option<String>,
+    /// USB VID/PID to discover via sysfs (mutually exclusive with `link_dev`).
     usb_id:   Option<(String, String)>,
 
-    // All channels indexed by their channel_id.
+    /// All channels indexed by wire channel id.
     channels: HashMap<u8, Box<dyn Channel>>,
 
-    // Single outbound TX queue that all channels write directly into.
+    /// Single outbound TX ring buffer shared by all channels.
     txq: TxQueue,
 
-    // Link state
-    parser:        FrameParser,
-    link_fd:       Option<RawFd>,
-    link_up:       bool,
-    link_bp:       bool,   // link TX queue above high-water; channel reads paused
-    disconnected:  bool,
-    reopen_at:     Instant,
-    reopen_delay:  Duration,
-    last_rx:       Option<Instant>,
-    last_tx:       Option<Instant>,
+    // ── Link state ────────────────────────────────────────────────────────
+    parser:       FrameParser,
+    link_fd:      Option<RawFd>,
+    /// Handshake complete.
+    link_up:      bool,
+    /// TX queue above high-water; channel reads are paused.
+    link_bp:      bool,
+    /// No link fd open; waiting to (re-)open.
+    disconnected: bool,
+    reopen_at:    Instant,
+    reopen_delay: Duration,
+    last_rx:      Option<Instant>,
+    last_tx:      Option<Instant>,
 }
 
 impl Daemon {
+    /// Create a new daemon.  `channels` will be registered with mio by the
+    /// channel constructors before being passed here.
     pub fn new(
-        mode: String,
+        mode:     String,
         link_dev: Option<String>,
-        usb_id: Option<(String, String)>,
+        usb_id:   Option<(String, String)>,
         channels: Vec<Box<dyn Channel>>,
     ) -> Self {
         let ch_map: HashMap<u8, Box<dyn Channel>> =
             channels.into_iter().map(|c| (c.channel_id(), c)).collect();
         Daemon {
-            mode, link_dev, usb_id,
+            mode,
+            link_dev,
+            usb_id,
             channels: ch_map,
-            txq:    TxQueue::new(),
-            parser: FrameParser::new(),
-            link_fd:  None,
-            link_up:  false,
-            link_bp:  false,
+            txq:          TxQueue::new(),
+            parser:       FrameParser::new(),
+            link_fd:      None,
+            link_up:      false,
+            link_bp:      false,
             disconnected: true,
             reopen_at:    Instant::now(),
             reopen_delay: Duration::from_millis(500),
-            last_rx: None,
-            last_tx: None,
+            last_rx:      None,
+            last_tx:      None,
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Link device resolution
-    // -----------------------------------------------------------------------
+    // ── Link device resolution ────────────────────────────────────────────
 
+    /// Resolve the link device path from USB sysfs or the fixed path.
     fn resolve_dev(&self) -> Option<String> {
         if let Some((vid, pid)) = &self.usb_id {
             return find_acm_by_usb_id(vid, pid);
@@ -84,9 +109,7 @@ impl Daemon {
         self.link_dev.clone()
     }
 
-    // -----------------------------------------------------------------------
-    // Link open / close
-    // -----------------------------------------------------------------------
+    // ── Link open / close ─────────────────────────────────────────────────
 
     fn open_link(&mut self, poll: &Poll) {
         let dev = match self.resolve_dev() {
@@ -100,10 +123,13 @@ impl Daemon {
         match open_serial_fd(&dev, 115200) {
             Ok(fd) => {
                 if let Err(e) = poll.registry().register(
-                    &mut SourceFd(&fd), TOKEN_LINK, Interest::READABLE)
-                {
+                    &mut SourceFd(&fd),
+                    TOKEN_LINK,
+                    Interest::READABLE,
+                ) {
                     log(&format!("Link: register error: {}", e));
-                    unsafe { libc::close(fd); }
+                    // SAFETY: `fd` was just opened and we are discarding it.
+                    close_raw(fd);
                     self.schedule_reopen();
                     return;
                 }
@@ -116,7 +142,7 @@ impl Daemon {
                 self.last_rx = Some(Instant::now());
                 self.last_tx = Some(Instant::now());
                 log(&format!("Link: opened {}", dev));
-                // Initiate handshake
+                // Initiate handshake.
                 self.txq.enqueue(&build_frame(F_HELLO, 0, b""));
                 self.set_link_write_interest(poll, true);
             }
@@ -134,18 +160,19 @@ impl Daemon {
         self.link_up      = false;
         if let Some(fd) = self.link_fd.take() {
             let _ = poll.registry().deregister(&mut SourceFd(&fd));
-            unsafe { libc::close(fd); }
+            // SAFETY: `fd` is the link fd we are closing; it won't be used again.
+            close_raw(fd);
         }
         self.txq.reset();
-        // Resume all channels before signalling link-down so they can flush state.
+        // Resume all channels before signalling link-down so they can flush.
         if self.link_bp {
             self.link_bp = false;
             let channels = &mut self.channels;
-            let reg = poll.registry();
+            let reg      = poll.registry();
             for ch in channels.values_mut() { ch.resume_source_reads(reg); }
         }
         let channels = &mut self.channels;
-        let reg = poll.registry();
+        let reg      = poll.registry();
         for ch in channels.values_mut() { ch.on_link_disconnect(reg); }
         self.schedule_reopen();
     }
@@ -155,11 +182,9 @@ impl Daemon {
         self.reopen_delay = self.reopen_delay.saturating_mul(2).min(Duration::from_secs(8));
     }
 
-    // -----------------------------------------------------------------------
-    // Link I/O
-    // -----------------------------------------------------------------------
+    // ── Link I/O ──────────────────────────────────────────────────────────
 
-    /// Update link fd read/write registration interest.
+    /// Update the link fd's mio interest (add / remove WRITABLE).
     fn set_link_write_interest(&self, poll: &Poll, want_write: bool) {
         if let Some(fd) = self.link_fd {
             let interest = if want_write {
@@ -167,7 +192,9 @@ impl Daemon {
             } else {
                 Interest::READABLE
             };
-            let _ = poll.registry().reregister(&mut SourceFd(&fd), TOKEN_LINK, interest);
+            let _ = poll
+                .registry()
+                .reregister(&mut SourceFd(&fd), TOKEN_LINK, interest);
         }
     }
 
@@ -176,13 +203,13 @@ impl Daemon {
         let mut buf = [0u8; 65536];
         match read_nonblock(fd, &mut buf) {
             Ok(None) | Ok(Some(0)) => {
-                // 0-byte read on a non-blocking TTY (VMIN=0) = no data, NOT EOF.
-                // Real disconnect raises OSError(EIO), caught below.
+                // 0-byte read on a non-blocking TTY (VMIN=0) = no data, not EOF.
+                // Real disconnect raises EIO, caught in the Err branch.
             }
             Ok(Some(n)) => {
                 self.last_rx = Some(Instant::now());
-                // Collect frames first so we hold no borrow on self.parser during
-                // dispatch, which needs &mut self.channels / &mut self.txq.
+                // Collect frames first: the borrow on `self.parser` must end
+                // before we call `dispatch_frame` which needs `&mut self`.
                 let mut frames: Vec<(u8, u8, Vec<u8>)> = Vec::new();
                 self.parser.feed(&buf[..n], |ftype, channel, payload| {
                     frames.push((ftype, channel, payload.to_vec()));
@@ -204,13 +231,13 @@ impl Daemon {
                 self.close_link(&format!("write error: {}", e), poll);
                 return;
             }
-            Ok(_) => {}
+            Ok(_empty) => {}
         }
         // Backpressure: resume channel reads when queue drains below low-water.
-        if self.link_bp && self.txq.queued_bytes <= LINK_LOW_WATER {
+        if self.link_bp && self.txq.used() <= LINK_LOW_WATER {
             self.link_bp = false;
             let channels = &mut self.channels;
-            let reg = poll.registry();
+            let reg      = poll.registry();
             for ch in channels.values_mut() { ch.resume_source_reads(reg); }
         }
         if self.txq.is_empty() {
@@ -218,7 +245,7 @@ impl Daemon {
         }
     }
 
-    /// Enqueue a pre-built frame and kick the write interest.
+    /// Enqueue a pre-built frame and arm the write interest.
     fn enqueue_frame(&mut self, frame: Vec<u8>, poll: &Poll) {
         if self.disconnected || self.link_fd.is_none() { return; }
         self.txq.enqueue(&frame);
@@ -226,19 +253,18 @@ impl Daemon {
         self.set_link_write_interest(poll, true);
     }
 
-    /// Apply backpressure check: pause channel reads if queue is above high-water.
+    /// Apply high-water backpressure: pause channel reads if the TX queue is
+    /// above [`LINK_HIGH_WATER`].
     fn check_bp_high(&mut self, poll: &Poll) {
-        if !self.link_bp && self.txq.queued_bytes >= LINK_HIGH_WATER {
+        if !self.link_bp && self.txq.used() >= LINK_HIGH_WATER {
             self.link_bp = true;
             let channels = &mut self.channels;
-            let reg = poll.registry();
+            let reg      = poll.registry();
             for ch in channels.values_mut() { ch.pause_source_reads(reg); }
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Frame dispatch
-    // -----------------------------------------------------------------------
+    // ── Frame dispatch ────────────────────────────────────────────────────
 
     fn dispatch_frame(&mut self, ftype: u8, channel: u8, payload: &[u8], poll: &Poll) {
         match ftype {
@@ -253,7 +279,7 @@ impl Daemon {
                     log("Link: peer reconnected, rebroadcasting channel states");
                     let ch_ids: Vec<u8> = self.channels.keys().copied().collect();
                     for id in ch_ids {
-                        let ch = &mut self.channels;
+                        let ch  = &mut self.channels;
                         let txq = &mut self.txq;
                         let reg = poll.registry();
                         if let Some(c) = ch.get_mut(&id) { c.on_link_connect(txq, reg); }
@@ -274,13 +300,12 @@ impl Daemon {
             _ => {}
         }
 
-        // Data / control frames → route to channel
+        // Bulk data / TCP control frames — route to channel.
         {
-            // Apply backpressure before writing (mirrors Python's send())
             let bulk = ftype == F_DATA || ftype == F_TDATA;
             if bulk { self.check_bp_high(poll); }
 
-            let ch = &mut self.channels;
+            let ch  = &mut self.channels;
             let txq = &mut self.txq;
             let reg = poll.registry();
             if let Some(c) = ch.get_mut(&channel) {
@@ -306,9 +331,7 @@ impl Daemon {
         self.set_link_write_interest(poll, !self.txq.is_empty());
     }
 
-    // -----------------------------------------------------------------------
-    // Keepalive
-    // -----------------------------------------------------------------------
+    // ── Keepalive ─────────────────────────────────────────────────────────
 
     fn tick_keepalive(&mut self, now: Instant, poll: &Poll) {
         if self.disconnected { return; }
@@ -327,10 +350,9 @@ impl Daemon {
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Timeout computation
-    // -----------------------------------------------------------------------
+    // ── Timeout computation ───────────────────────────────────────────────
 
+    /// Compute how long to block in the next `poll()` call.
     fn next_timeout(&self, now: Instant) -> Duration {
         let mut deadline = now + MAX_TICK;
         if self.disconnected {
@@ -345,10 +367,9 @@ impl Daemon {
         if deadline > now { deadline - now } else { Duration::ZERO }
     }
 
-    // -----------------------------------------------------------------------
-    // Main loop
-    // -----------------------------------------------------------------------
+    // ── Main loop ─────────────────────────────────────────────────────────
 
+    /// Run the event loop until killed.
     pub fn run(&mut self, poll: &mut Poll) {
         log(&format!("serialmux {} started", self.mode));
         let mut events = Events::with_capacity(128);
@@ -363,7 +384,7 @@ impl Daemon {
 
             self.tick_keepalive(now, poll);
 
-            // Tick all channels (timers, UART reopen, etc.)
+            // Tick all channels (UART reopen, MCU silence timeout, …).
             let ch_ids: Vec<u8> = self.channels.keys().copied().collect();
             for id in ch_ids {
                 let ch  = &mut self.channels;
@@ -390,12 +411,10 @@ impl Daemon {
                 let writable = event.is_writable();
 
                 if token == TOKEN_LINK {
-                    if self.link_fd.is_none() { continue; } // stale event
+                    if self.link_fd.is_none() { continue; } // stale event after close
                     if readable { self.link_read(poll); }
                     if writable && self.link_fd.is_some() { self.link_write(poll); }
                 } else if let Some(ch_id) = channel_id_for_token(token) {
-                    // Apply high-water backpressure before dispatching
-                    // (conservative: always check here; channel reads are the source)
                     {
                         let ch  = &mut self.channels;
                         let txq = &mut self.txq;

@@ -1,3 +1,17 @@
+//! `serialmux` — Klipper serial + TCP multiplexer over a USB CDC gadget link.
+//!
+//! Drop-in Rust replacement for `serialmux.py`.  Identical CLI, identical
+//! wire protocol, identical channel semantics — only the binary path in
+//! `ExecStart` changes.
+//!
+//! # Modes
+//! | Mode       | Description |
+//! |------------|-------------|
+//! | `exporter` | Runs on the machine wired to the MCUs (K1 / K1C SoC board). |
+//! | `host`     | Runs on the Klipper host (Raspberry Pi / BTT CB1). |
+//!
+//! See `serialmux --help` for full usage.
+
 mod channel;
 mod daemon;
 mod protocol;
@@ -47,6 +61,7 @@ EXAMPLES
 // CLI argument types
 // ---------------------------------------------------------------------------
 
+/// Parsed channel specification from the CLI.
 #[derive(Debug)]
 enum ChannelSpec {
     McuExporter { id: u8, device: String, baud: u32 },
