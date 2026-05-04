@@ -927,13 +927,14 @@ impl Channel for TcpSourceChannel {
 
         match ftype {
             F_TDATA => {
+                if data.is_empty() { return; }
                 // Use a flag to avoid holding the `conn` borrow across `close_slot`
                 // and `update_conn_interest`, which both need `&mut self`.
                 enum TDataAction { Close, Update, Skip }
                 let action = if let Some(conn) = self.conns[slot].as_mut() {
                     let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
                         .saturating_sub(conn.txbuf.len());
-                    if data.is_empty() || conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
+                    if conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
                         TDataAction::Close
                     } else {
                         conn.txbuf.extend_from_slice(data);
@@ -1308,11 +1309,12 @@ impl Channel for TcpDestChannel {
                 }
             }
             F_TDATA => {
+                if data.is_empty() { return; }
                 enum TDataAction { Close, Update, Skip }
                 let action = if let Some(conn) = self.conns[slot].as_mut() {
                     let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
                         .saturating_sub(conn.txbuf.len());
-                    if data.is_empty() || conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
+                    if conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
                         TDataAction::Close
                     } else {
                         conn.txbuf.extend_from_slice(data);

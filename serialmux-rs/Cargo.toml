@@ -11,7 +11,11 @@ path = "src/main.rs"
 [dependencies]
 mio       = { version = "1.2",  features = ["os-poll", "net", "os-ext"] }
 crc32fast = "1.5"
-nix       = { version = "0.31", features = ["term", "fs", "ioctl"] }
+nix       = { version = "0.31", features = [
+    "term",   # termios: tcgetattr / tcsetattr / cfsetspeed
+    "fs",     # fcntl / open flags
+    "ioctl",  # kept for potential platform-specific ioctl use (e.g. TIOCGPTN)
+] }
 libc      = "0.2"
 
 [profile.release]
