@@ -15,6 +15,15 @@ NOZZLE_BAUD="230400"
 
 DAEMON_ARGS="exporter --usb $USB_ID mcu:0:$MCU_DEV:$MCU_BAUD mcu:1:$NOZZLE_DEV:$NOZZLE_BAUD"
 
+# --- windlass-bridge alternative (NOT compatible with serialmux) ---
+# Both ends (K1 exporter + Pi host) must run windlass-bridge together.
+# Build with: cd serialmux-rs && cargo build --release --features windlass
+# Install binary to /usr/data/pik1/windlass-bridge, then:
+#   1. Uncomment WINDLASS_ARGS below.
+#   2. Replace the "SCRIPT / PYTHON" ExecStart block with the windlass one.
+#   3. Also update pik1.service on the Pi to use windlass-bridge host mode.
+#WINDLASS_ARGS="exporter --usb $USB_ID mcu:0:$MCU_DEV:$MCU_BAUD mcu:1:$NOZZLE_DEV:$NOZZLE_BAUD"
+
 case "$1" in
     start)
         if [ ! -x "$PYTHON" ]; then
@@ -32,6 +41,11 @@ case "$1" in
         start-stop-daemon -S -b -m -p "$PIDFILE" \
             -x /bin/sh -- -c \
             "exec $PYTHON $SCRIPT $DAEMON_ARGS >> $LOGFILE 2>&1"
+        # windlass-bridge alternative (uncomment and comment out block above):
+        #WINDLASS="/usr/data/pik1/windlass-bridge"
+        #start-stop-daemon -S -b -m -p "$PIDFILE" \
+        #    -x /bin/sh -- -c \
+        #    "exec $WINDLASS $WINDLASS_ARGS >> $LOGFILE 2>&1"
         ;;
     stop)
         echo "Stopping serialmux exporter..."

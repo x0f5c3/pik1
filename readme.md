@@ -491,3 +491,86 @@ sides.
 | JST wiring harness to mainboard header, VBUS omitted | Cleanest permanent solution |
 
 GND **must** remain connected for the data link to work.
+
+---
+
+## Windlass bridge (native Klipper transport)
+
+> **opt-in, not compatible with `serialmux`** — both the K1 exporter and the
+> Pi/CB1 host must run `windlass-bridge` at the same time.
+
+`windlass-bridge` is an alternative to `serialmux` that relays raw Klipper
+transport frames directly over the USB CDC ACM link instead of wrapping them
+in the serialmux envelope.
+
+### Comparison
+
+| Property | serialmux | windlass-bridge |
+|---|---|---|
+| Framing overhead per MCU frame | ~10 bytes (serialmux envelope) | 1 byte (channel index only) |
+| Host PTY required | Yes | No (Unix domain socket) |
+| TCP channel tunnelling | Yes | No |
+| I/O model | `mio` single-thread | `tokio` async tasks |
+| Klipper config change required | No | Yes (socket path) |
+| Compatible with C/Python daemon | Yes | No |
+
+### Tunnel wire format
+
+```
+[ ch_id : u8 ][ raw Klipper frame : 5..=64 bytes ]
+```
+
+The raw Klipper frame is self-delimiting (length byte at `[0]`, sync byte
+`0x7E` at `[end]`), so the tunnel adds only **one byte** of overhead per frame.
+
+### Build
+
+```bash
+cd serialmux-rs
+cargo build --release --features windlass
+# Produces: target/release/windlass-bridge
+```
+
+### Deploy
+
+**K1 / K1C SoC (exporter)**  
+Copy `windlass-bridge` to `/usr/data/pik1/windlass-bridge`, then edit
+`/etc/init.d/S99pik1` — follow the commented-out instructions in that file to
+switch from the `serialmux.py` block to the `windlass-bridge` block.
+
+**Pi / BTT CB1 (host)**  
+Copy `windlass-bridge` to `/opt/pik1/windlass-bridge`, then edit
+`/etc/systemd/system/pik1.service` — follow the commented-out instructions to
+switch `ExecStart` from `serialmux.py` to `windlass-bridge host`.
+
+### Klipper config
+
+Replace the PTY device path with the Unix socket path in `printer.cfg`:
+
+```ini
+# Before (serialmux):
+[mcu]
+serial: /tmp/klipper_mcu        # symlink to /dev/pts/…
+
+# After (windlass-bridge):
+[mcu]
+serial: /tmp/klipper_mcu0
+restart_method: command
+
+[mcu nozzle_mcu]
+serial: /tmp/klipper_mcu1
+restart_method: command
+```
+
+Klipper supports Unix domain socket paths directly in the `serial:` field, so
+no additional configuration is needed.
+
+### Limitations
+
+- **No TCP channel tunnelling** — `F_TCONN`/`F_TDATA`/`F_TCLOSE` frames are
+  not supported.  Users who rely on the TCP tunnel (e.g. for Moonraker) must
+  keep using `serialmux`.
+- **No PTY** — Klipper's `serial:` field must point to the Unix socket path,
+  not a `/dev/pts/…` device.
+- **Both ends must match** — mixing a `serialmux` exporter with a
+  `windlass-bridge` host (or vice versa) will not work.

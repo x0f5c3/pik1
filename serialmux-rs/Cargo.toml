@@ -8,6 +8,28 @@ description = "Klipper serial + TCP multiplexer over a USB CDC gadget link (Rust
 name = "serialmux"
 path = "src/main.rs"
 
+# Optional windlass-bridge binary (native Klipper transport relay).
+# Enable with: cargo build --features windlass
+# This binary is NOT compatible with the Python/C serialmux daemon.
+[[bin]]
+name = "windlass-bridge"
+path = "src/bin/windlass_bridge.rs"
+required-features = ["windlass"]
+
+[features]
+# Native Klipper-protocol relay using tokio.  Adds a second binary
+# (`windlass-bridge`) that is faster, PTY-free, and more efficient
+# than the serialmux protocol but is NOT compatible with the C/Python
+# serialmux daemon.  Users must choose one or the other.
+windlass = [
+    "dep:windlass",
+    "dep:anchor",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:bytes",
+    "dep:futures",
+]
+
 [dependencies]
 mio       = { version = "1.2",  features = ["os-poll", "net", "os-ext"] }
 crc32fast = "1.5"
@@ -17,6 +39,16 @@ nix       = { version = "0.31", features = [
     "ioctl",  # kept for potential platform-specific ioctl use (e.g. TIOCGPTN)
 ] }
 libc      = "0.2"
+
+# --- windlass feature dependencies (optional) --------------------------------
+# windlass: host-side Klipper protocol (future: MCU monitoring, filtering).
+windlass   = { git = "https://github.com/x0f5c3/windlass", optional = true }
+# anchor: MCU-side Klipper protocol (future: virtual MCU on host side).
+anchor     = { git = "https://github.com/x0f5c3/anchor", features = ["std"], optional = true }
+futures    = { version = "0.3", optional = true }
+tokio      = { version = "1", features = ["full"], optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
+bytes      = { version = "1", optional = true }
 
 [profile.release]
 opt-level   = 3

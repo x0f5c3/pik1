@@ -18,6 +18,16 @@ ExecStart=/usr/bin/python3 /opt/pik1/serialmux.py host /dev/ttyGS0 \
     mcu:0:/tmp/klipper_mcu \
     mcu:1:/tmp/klipper_toolhead
 
+# windlass-bridge alternative (NOT compatible with serialmux):
+# Both ends (K1 exporter + Pi host) must run windlass-bridge together.
+# Build: cd serialmux-rs && cargo build --release --features windlass
+# Install binary to /opt/pik1/windlass-bridge, then comment out ExecStart
+# above and uncomment the block below.  Update printer.cfg to use socket
+# paths (/tmp/klipper_mcu0, /tmp/klipper_mcu1) instead of PTY paths.
+#ExecStart=/opt/pik1/windlass-bridge host /dev/ttyGS0 \
+#    mcu:0:/tmp/klipper_mcu0 \
+#    mcu:1:/tmp/klipper_mcu1
+
 Restart=always
 RestartSec=2
 
