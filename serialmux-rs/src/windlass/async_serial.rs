@@ -191,16 +191,3 @@ fn baud_to_nix(baud: u32) -> Option<nix::sys::termios::BaudRate> {
 pub(crate) fn nix_to_io(e: nix::errno::Errno) -> io::Error {
     io::Error::from_raw_os_error(e as i32)
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Retrieve the device path for a raw fd via /proc/self/fd (for logging).
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Return the filesystem path that `fd` refers to (via `/proc/self/fd`).
-/// Returns `None` if resolution fails (non-Linux or permission error).
-#[allow(dead_code)]
-pub fn fd_path(fd: RawFd) -> Option<String> {
-    std::fs::read_link(format!("/proc/self/fd/{}", fd))
-        .ok()
-        .map(|p| p.to_string_lossy().into_owned())
-}
