@@ -49,6 +49,8 @@ use serialmux::windlass::{
     McuSpec,
     exporter::run_exporter,
     host::run_host,
+    smart_exporter::run_smart_exporter,
+    smart_host::run_smart_host,
     resolve_link_device,
 };
 
@@ -62,6 +64,13 @@ MODES
   host       Run on the Klipper host (Pi / CB1).  Exposes Unix sockets
              that Klipper connects to instead of PTY devices.
 
+OPTIONS
+  --smart    Enable smart-proxy mode (windlass + anchor).  In this mode the
+             Klipper transport session is terminated at each end of the USB
+             link.  The MCU dictionary is forwarded to the host so Klipper's
+             'identify' handshake is answered locally.  Both ends must use
+             the same mode flag.
+
 LINK DEVICE
   --usb VID:PID   Discover CDC ACM device by USB ID (waits for appearance).
   link_dev        Explicit device path (e.g. /dev/ttyGS0).
@@ -72,15 +81,19 @@ CHANNEL SPECS
   mcu:<id>:<socket_path>          host: Unix socket path for Klipper
 
 EXAMPLES
-  Exporter (K1C SoC):
+  Transparent relay (default):
     windlass-bridge exporter --usb 1d6b:0104 \
-        mcu:0:/dev/ttyS7:230400 \
-        mcu:1:/dev/ttyS1:230400
+        mcu:0:/dev/ttyS7:230400
 
-  Host (Pi / CB1):
     windlass-bridge host /dev/ttyGS0 \
-        mcu:0:/tmp/klipper_mcu0 \
-        mcu:1:/tmp/klipper_mcu1
+        mcu:0:/tmp/klipper_mcu0
+
+  Smart-proxy mode (windlass + anchor, recommended):
+    windlass-bridge exporter --smart --usb 1d6b:0104 \
+        mcu:0:/dev/ttyS7:230400
+
+    windlass-bridge host --smart /dev/ttyGS0 \
+        mcu:0:/tmp/klipper_mcu0
 
   printer.cfg:
     [mcu]
@@ -94,6 +107,7 @@ EXAMPLES
 
 struct Args {
     mode:     String,
+    smart:    bool,
     link_dev: Option<String>,
     usb_id:   Option<(String, String)>,
     channels: Vec<McuSpec>,
@@ -126,11 +140,14 @@ fn parse_args() -> Args {
     let mut link_dev: Option<String> = None;
     let mut usb_id: Option<(String, String)> = None;
     let mut channel_strs: Vec<String> = Vec::new();
+    let mut smart = false;
     let mut i = 2usize;
 
     while i < raw.len() {
         let arg = &raw[i];
-        if arg == "--usb" {
+        if arg == "--smart" {
+            smart = true;
+        } else if arg == "--usb" {
             i += 1;
             if i >= raw.len() {
                 usage_exit("--usb requires an argument");
@@ -165,7 +182,7 @@ fn parse_args() -> Args {
     }
 
     let channels = parse_channel_specs(&mode, &channel_strs);
-    Args { mode, link_dev, usb_id, channels }
+    Args { mode, smart, link_dev, usb_id, channels }
 }
 
 fn parse_usb_id(val: &str) -> (String, String) {
@@ -271,7 +288,13 @@ async fn main() {
     );
 
     let result = if args.mode == "exporter" {
-        run_exporter(link_device, args.channels).await
+        if args.smart {
+            run_smart_exporter(link_device, args.channels).await
+        } else {
+            run_exporter(link_device, args.channels).await
+        }
+    } else if args.smart {
+        run_smart_host(link_device, args.channels).await
     } else {
         run_host(link_device, args.channels).await
     };

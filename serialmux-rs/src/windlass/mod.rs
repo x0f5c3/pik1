@@ -48,6 +48,9 @@ pub mod async_serial;
 pub mod exporter;
 pub mod framing;
 pub mod host;
+pub mod mcu_transport;
+pub mod smart_exporter;
+pub mod smart_host;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};

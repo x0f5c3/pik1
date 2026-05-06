@@ -1,10 +1,15 @@
 //! Tunnel-link framing codecs.
 //!
-//! Two codecs are provided:
+//! Three codecs are provided:
 //!
 //! * [`TunnelCodec`] — encodes / decodes the **CDC tunnel** format:
 //!   `[ch_id:u8][raw Klipper frame]`.  Used on both exporter and host sides
 //!   when reading from / writing to the USB CDC ACM link.
+//!
+//! * [`PayloadTunnelCodec`] — encodes / decodes the **smart-proxy tunnel**
+//!   format: `[ch_id:u8][payload_len:u8][payload:payload_len bytes]`.  Used
+//!   in smart-proxy mode where the Klipper wire protocol is terminated at each
+//!   end and only the decoded payload bytes cross the CDC link.
 //!
 //! * [`KlipperFramer`] — decodes a **raw Klipper serial stream** into
 //!   individual complete Klipper frames (5–64 bytes, sync-byte terminated).
@@ -105,6 +110,106 @@ impl Encoder<TunnelFrame> for TunnelCodec {
         dst.reserve(1 + item.frame.len());
         dst.put_u8(item.ch_id);
         dst.extend_from_slice(&item.frame);
+        Ok(())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PayloadTunnelFrame
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Channel IDs reserved for the smart-proxy control channel.
+pub const CTRL_CH: u8 = 0xFF;
+/// Control payload type: dictionary fragment bytes.
+pub const CTRL_DICT_FRAG: u8 = 0x01;
+/// Control payload type: dictionary transfer complete (no additional bytes).
+pub const CTRL_DICT_DONE: u8 = 0x02;
+/// Maximum dictionary bytes per [`CTRL_DICT_FRAG`] payload
+/// (`255 - 1` byte for the type tag).
+pub const DICT_FRAG_MAX: usize = 254;
+
+/// A smart-proxy tunnel packet: decoded Klipper payload bytes tagged with a
+/// channel ID.
+///
+/// Wire format: `[ch_id:u8][payload_len:u8][payload:payload_len bytes]`
+///
+/// `payload` is the inner Klipper message — the variable-length content that
+/// sits between the two-byte frame header and the three-byte trailer in the
+/// on-wire Klipper format.  The CDC link carries *only* these bytes; no CRC,
+/// sequence number, or sync byte is present.
+///
+/// `ch_id = 0xFF` ([`CTRL_CH`]) is reserved for the control channel (dictionary
+/// forwarding and other future control messages).
+#[derive(Debug, Clone)]
+pub struct PayloadTunnelFrame {
+    /// Channel index (0–254 for MCU data; 255 = control).
+    pub ch_id: u8,
+    /// Decoded Klipper payload (0–255 bytes).
+    pub payload: bytes::Bytes,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PayloadTunnelCodec
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// `tokio_util` codec for the smart-proxy CDC tunnel link.
+///
+/// ## Wire layout
+///
+/// ```text
+/// [ ch_id : u8 ][ payload_len : u8 ][ payload : payload_len bytes ]
+/// ```
+///
+/// `payload` is the decoded Klipper message bytes — no Klipper wire framing
+/// (no length byte, no seq byte, no CRC, no sync byte).  Klipper's transport
+/// sessions are terminated at each end of the CDC link, so the link only
+/// carries clean application payloads.
+///
+/// A zero-length payload is valid (used e.g. for keep-alive or as a DICT_DONE
+/// control message where the type byte alone constitutes the payload).
+#[derive(Default)]
+pub struct PayloadTunnelCodec;
+
+impl Decoder for PayloadTunnelCodec {
+    type Item = PayloadTunnelFrame;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // Need at least ch_id (1) + payload_len (1).
+        if src.len() < 2 {
+            return Ok(None);
+        }
+        let ch_id = src[0];
+        let payload_len = src[1] as usize;
+        let total = 2 + payload_len;
+        if src.len() < total {
+            src.reserve(total - src.len());
+            return Ok(None);
+        }
+        src.advance(2); // consume ch_id + payload_len
+        let payload = src.split_to(payload_len).freeze();
+        Ok(Some(PayloadTunnelFrame { ch_id, payload }))
+    }
+}
+
+impl Encoder<PayloadTunnelFrame> for PayloadTunnelCodec {
+    type Error = io::Error;
+
+    fn encode(&mut self, item: PayloadTunnelFrame, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let len = item.payload.len();
+        if len > 255 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "smart-proxy payload {} bytes exceeds 255-byte limit",
+                    len
+                ),
+            ));
+        }
+        dst.reserve(2 + len);
+        dst.put_u8(item.ch_id);
+        dst.put_u8(len as u8);
+        dst.extend_from_slice(&item.payload);
         Ok(())
     }
 }
@@ -346,5 +451,72 @@ mod tests {
 
         let mut dec = TunnelCodec;
         assert!(dec.decode(&mut buf).unwrap().is_none());
+    }
+
+    // ── PayloadTunnelCodec ───────────────────────────────────────────────────
+
+    #[test]
+    fn payload_tunnel_roundtrip() {
+        let payload = bytes::Bytes::from_static(&[0x01, 0x00, 0x28]);
+        let pf = PayloadTunnelFrame { ch_id: 5, payload: payload.clone() };
+
+        let mut buf = BytesMut::new();
+        let mut enc = PayloadTunnelCodec;
+        enc.encode(pf, &mut buf).unwrap();
+
+        // Wire: [ch_id=5][len=3][0x01,0x00,0x28]
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf[0], 5);
+        assert_eq!(buf[1], 3);
+
+        let mut dec = PayloadTunnelCodec;
+        let got = dec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(got.ch_id, 5);
+        assert_eq!(got.payload.as_ref(), payload.as_ref());
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn payload_tunnel_zero_length_payload() {
+        let pf = PayloadTunnelFrame {
+            ch_id: 0xFF,
+            payload: bytes::Bytes::new(),
+        };
+        let mut buf = BytesMut::new();
+        PayloadTunnelCodec.encode(pf, &mut buf).unwrap();
+        assert_eq!(buf.len(), 2); // ch_id + len=0
+        assert_eq!(buf[0], 0xFF);
+        assert_eq!(buf[1], 0x00);
+
+        let got = PayloadTunnelCodec.decode(&mut buf).unwrap().unwrap();
+        assert_eq!(got.ch_id, 0xFF);
+        assert!(got.payload.is_empty());
+    }
+
+    #[test]
+    fn payload_tunnel_returns_none_when_incomplete() {
+        // Only ch_id byte present, no length byte yet.
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x02); // ch_id only
+        assert!(PayloadTunnelCodec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn payload_tunnel_returns_none_when_payload_incomplete() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x01); // ch_id
+        buf.put_u8(10);   // claims 10 bytes
+        buf.extend_from_slice(&[0xAA; 5]); // only 5 bytes present
+        assert!(PayloadTunnelCodec.decode(&mut buf).unwrap().is_none());
+    }
+
+    #[test]
+    fn payload_tunnel_rejects_oversized_payload() {
+        let pf = PayloadTunnelFrame {
+            ch_id: 0,
+            payload: bytes::Bytes::from(vec![0u8; 256]),
+        };
+        let mut buf = BytesMut::new();
+        assert!(PayloadTunnelCodec.encode(pf, &mut buf).is_err());
     }
 }
