@@ -53,12 +53,13 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 
+use anchor::encoding::Writable as _;
+
 use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
     CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, PayloadTunnelCodec, PayloadTunnelFrame,
 };
-use crate::windlass::mcu_transport::encode_vlq;
 use crate::windlass::prepare_socket_path;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -127,16 +128,20 @@ impl anchor::transport::Config for ProxyConfig {
 
             // Build identify_response payload:
             // [cmd=0 VLQ][offset VLQ][data_len VLQ][data bytes]
+            // Uses anchor::encoding::Writable (already public in anchor's std
+            // feature) to write VLQ-encoded integers into a Vec<u8>
+            // OutputBuffer.  This removes the dependency on our local
+            // encode_vlq copy in mcu_transport.rs.
             let mut resp = Vec::new();
-            encode_vlq(&mut resp, 0);                // cmd = 0 (identify_response)
-            encode_vlq(&mut resp, offset);           // offset
-            encode_vlq(&mut resp, chunk.len() as u32);
+            (0u32).write(&mut resp);               // cmd = 0 (identify_response)
+            offset.write(&mut resp);               // offset
+            (chunk.len() as u32).write(&mut resp); // data_len
             resp.extend_from_slice(chunk);
             ctx.pending_responses.push(resp);
         } else {
             // Forward all other commands to the exporter.
             let mut payload = Vec::new();
-            encode_vlq(&mut payload, cmd as u32);
+            (cmd as u32).write(&mut payload);
             payload.extend_from_slice(frame);
             *frame = &[]; // mark frame as fully consumed
             let _ = ctx.to_exporter.send(payload);

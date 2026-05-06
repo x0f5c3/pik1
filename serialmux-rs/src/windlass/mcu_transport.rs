@@ -208,7 +208,13 @@ pub async fn fetch_dictionary(
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Encode `v` as a signed VLQ integer and append it to `buf`.
-pub(crate) fn encode_vlq(buf: &mut Vec<u8>, v: u32) {
+///
+/// This is a local copy of `windlass::encoding::encode_vlq_int` needed only
+/// because that function is currently `pub(crate)`.  Once
+/// `windlass::encoding::encode_vlq_int` is made public (see
+/// `patches/windlass-expose-transport.patch`) this copy can be removed and
+/// callers can `use windlass::encode_vlq_int` directly.
+fn encode_vlq(buf: &mut Vec<u8>, v: u32) {
     let sv = v as i32;
     if !((-(1 << 26))..(3 << 26)).contains(&sv) {
         buf.push(((sv >> 28) & 0x7F) as u8 | 0x80);
@@ -228,7 +234,13 @@ pub(crate) fn encode_vlq(buf: &mut Vec<u8>, v: u32) {
 /// Decode a signed VLQ integer from the front of `data`, advancing the slice.
 ///
 /// Returns `None` if `data` is empty or the encoding is malformed.
-pub(crate) fn parse_vlq(data: &mut &[u8]) -> Option<u32> {
+///
+/// This is a local copy of `windlass::encoding::parse_vlq_int` needed only
+/// because that function is currently `pub(crate)`.  Once
+/// `windlass::encoding::parse_vlq_int` is made public (see
+/// `patches/windlass-expose-transport.patch`) this copy can be removed and
+/// `fetch_dictionary` can use `windlass::parse_vlq_int` directly.
+fn parse_vlq(data: &mut &[u8]) -> Option<u32> {
     let first = *data.first()?;
     *data = &data[1..];
     let mut c = first as u32;

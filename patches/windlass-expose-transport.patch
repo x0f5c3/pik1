@@ -1,0 +1,271 @@
+From: pik1 smart-proxy upgrade
+Date: 2026-05-06
+Subject: [PATCH] feat: expose Transport, TransportReceiver, and VLQ helpers as public
+
+## Motivation
+
+The `windlass-bridge` smart-proxy mode (serialmux-rs) needs to use the
+low-level Klipper transport machinery directly:
+
+  1. **Exporter side** – connect to the MCU UART with `Transport::connect`,
+     receive decoded frame payloads (CRC already verified, seq stripped),
+     forward them over the USB tunnel as bare bytes.
+
+  2. **Dictionary fetch** – call `identify`/`identify_response` to retrieve
+     the MCU's compressed dictionary, then keep the same transport alive for
+     the relay phase.
+
+  3. **VLQ encode/decode** – build `identify` request payloads and parse
+     `identify_response` payloads without duplicating the algorithm.
+
+All three are blocked by `pub(crate)` visibility.  The current workaround
+in `pik1/serialmux-rs/src/windlass/mcu_transport.rs` is a ~400-line
+verbatim copy of this module, with a comment explaining exactly why it
+exists.  Applying this patch removes that copy entirely.
+
+## What changes
+
+### `src/encoding.rs`
+- `encode_vlq_int` and `parse_vlq_int` become `pub`.
+  `next_byte` is left private (it is only an implementation detail).
+
+### `src/transport.rs`
+- `struct Transport` becomes `pub`.
+- `type TransportReceiver` becomes `pub`.
+- `Transport::connect`, `Transport::send`, `Transport::close` become `pub`.
+  All private helpers (`LowlevelReader`, `LowlevelWriter`, `TransportState`,
+  `MessageQueue`, `Frame`, `InflightFrame`) stay private — callers only
+  need the three public methods.
+
+### `src/lib.rs`
+- `mod transport` becomes `pub mod transport` so that `TransportReceiver`'s
+  type alias (which mentions the private `TransportError` variants) resolves
+  correctly when used in downstream crates.
+- Flat re-exports added at crate root:
+  - `Transport`, `TransportReceiver` – the connect/send/close handle.
+  - `TransportError` and its three source variants
+    (`MessageEncodeError`, `ReceiverError`, `TransmitterError`) – needed so
+    downstream crates can match on the error returned by the receiver channel
+    without importing the internal `transport` module.
+  - `encode_vlq_int`, `parse_vlq_int` – standalone VLQ codec helpers.
+
+## How to use after this patch
+
+```rust
+use windlass::{Transport, TransportReceiver, TransportError};
+use windlass::{encode_vlq_int, parse_vlq_int};
+
+// Connect to a UART stream (AsyncRead + AsyncWrite + Send + 'static)
+let (transport, mut rx) = Transport::connect(uart).await;
+
+// Receive decoded payloads (CRC verified, seq stripped)
+while let Some(result) = rx.recv().await {
+    match result {
+        Ok(payload) => forward_to_tunnel(payload),
+        Err(TransportError::Receiver(e)) => eprintln!("rx error: {e}"),
+        Err(e) => return Err(e.into()),
+    }
+}
+
+// Send a command payload (no framing needed; transport adds CRC + seq)
+let mut req = Vec::new();
+encode_vlq_int(&mut req, 1);  // cmd = 1 (identify)
+encode_vlq_int(&mut req, 0);  // offset = 0
+encode_vlq_int(&mut req, 40); // count = 40
+transport.send(&req)?;
+```
+
+## Impact on pik1/serialmux-rs
+
+After applying this patch and updating the `Cargo.toml` rev, the following
+simplifications become possible in `serialmux-rs`:
+
+1. **Delete `src/windlass/mcu_transport.rs`** (the entire ~400-line file):
+   - `McuTransport` → replaced by `windlass::Transport`
+   - `McuPayloadReceiver` → replaced by `windlass::TransportReceiver`
+   - `encode_vlq` / `parse_vlq` → replaced by `windlass::encode_vlq_int`
+     / `windlass::parse_vlq_int`
+   - `fetch_dictionary` is the only function that needs to stay, but it
+     shrinks to ~30 lines and no longer reimplements the transport protocol.
+
+2. **`src/windlass/smart_exporter.rs`** — import changes only:
+   ```rust
+   // Before:
+   use crate::windlass::mcu_transport::{McuTransport, fetch_dictionary};
+   // After:
+   use windlass::{Transport, encode_vlq_int, parse_vlq_int};
+   ```
+
+3. **`src/windlass/smart_host.rs`** — already uses `anchor::encoding::Writable`
+   (no local VLQ copy), so no change needed there.
+
+---
+
+diff --git a/src/encoding.rs b/src/encoding.rs
+--- a/src/encoding.rs
++++ b/src/encoding.rs
+@@ -14,7 +14,14 @@ pub enum MessageDecodeError {
+     Utf8Error(#[from] std::str::Utf8Error),
+ }
+ 
+-pub(crate) fn encode_vlq_int(output: &mut Vec<u8>, v: u32) {
++/// Encode `v` as a Klipper signed VLQ integer and append the bytes to `output`.
++///
++/// The Klipper VLQ format encodes a signed 32-bit integer in 1–5 bytes.
++/// Each byte carries 7 data bits with bit 7 set on all but the last byte.
++/// Small positive values (< 128) encode to a single byte.
++///
++/// See also [`parse_vlq_int`] for the decode direction.
++pub fn encode_vlq_int(output: &mut Vec<u8>, v: u32) {
+     let sv = v as i32;
+     if !(-(1 << 26)..(3 << 26)).contains(&sv) {
+         output.push(((sv >> 28) & 0x7F) as u8 | 0x80);
+@@ -31,12 +38,19 @@ pub(crate) fn encode_vlq_int(output: &mut Vec<u8>, v: u32) {
+     output.push((sv & 0x7F) as u8);
+ }
+ 
+-pub(crate) fn next_byte(data: &mut &[u8]) -> Result<u8, MessageDecodeError> {
++fn next_byte(data: &mut &[u8]) -> Result<u8, MessageDecodeError> {
+     if data.is_empty() {
+         Err(MessageDecodeError::UnexpectedEof)
+     } else {
+         let v = data[0];
+         *data = &data[1..];
+         Ok(v)
+     }
+ }
+ 
+-pub(crate) fn parse_vlq_int(data: &mut &[u8]) -> Result<u32, MessageDecodeError> {
++/// Decode a Klipper signed VLQ integer from the front of `data`.
++///
++/// Advances `data` past the consumed bytes on success.
++/// Returns `Err(MessageDecodeError::UnexpectedEof)` if `data` is too short.
++///
++/// See also [`encode_vlq_int`] for the encode direction.
++pub fn parse_vlq_int(data: &mut &[u8]) -> Result<u32, MessageDecodeError> {
+     let mut c = next_byte(data)? as u32;
+     let mut v = c & 0x7F;
+
+diff --git a/src/transport.rs b/src/transport.rs
+--- a/src/transport.rs
++++ b/src/transport.rs
+@@ -36,7 +36,18 @@ pub enum TransmitterError {
+     ConnectionClosed,
+ }
+ 
+-#[derive(Debug)]
+-pub(crate) struct Transport {
++/// Host-side Klipper transport handle.
++///
++/// Terminates the Klipper wire protocol (CRC-16, ACK/NAK, sequence numbers)
++/// for a stream connected to an MCU.  Exposes two operations:
++///
++/// - [`Transport::send`] — queue a payload for delivery to the MCU.  The
++///   transport adds the wire header/trailer (length, sequence, CRC, sync).
++/// - The paired [`TransportReceiver`] channel — each item is a decoded MCU
++///   frame payload (header/trailer already stripped and validated).
++///
++/// Construct with [`Transport::connect`].
++#[derive(Debug)]
++pub struct Transport {
+     _task_rdr: JoinHandle<()>,
+     _task_wr: JoinHandle<()>,
+     task_inner: JoinHandle<()>,
+@@ -49,10 +60,18 @@ enum TransportCommand {
+     Exit,
+ }
+ 
+-pub(crate) type TransportReceiver = UnboundedReceiver<Result<Vec<u8>, TransportError>>;
++/// Receives decoded MCU frame payloads from a [`Transport`].
++///
++/// Each item is `Ok(payload)` where `payload` is the variable-length bytes
++/// between the Klipper frame header (2 bytes) and trailer (3 bytes), with
++/// CRC validated and sequence number processed.  An `Err` item signals a
++/// transport-level error and the channel will not produce further items.
++pub type TransportReceiver = UnboundedReceiver<Result<Vec<u8>, TransportError>>;
+ 
+ impl Transport {
+-    pub(crate) async fn connect<R>(stream: R) -> (Transport, TransportReceiver)
++    /// Connect to a Klipper MCU stream.
++    ///
++    /// Spawns background tasks for the reader, writer, and protocol state
++    /// machine.  Returns the transport handle and the payload receiver.
++    pub async fn connect<R>(stream: R) -> (Transport, TransportReceiver)
+     where
+         R: AsyncRead + AsyncWrite + Send + 'static,
+     {
+@@ -101,13 +120,21 @@ impl Transport {
+         )
+     }
+ 
+-    pub(crate) fn send(&self, msg: &[u8]) -> Result<(), TransmitterError> {
++    /// Queue a payload for delivery to the MCU.
++    ///
++    /// `msg` is the raw Klipper message payload (VLQ-encoded command ID +
++    /// arguments, **without** the 2-byte header or 3-byte trailer).  The
++    /// transport adds framing, CRC, and handles retransmission.
++    ///
++    /// Returns `Err(TransmitterError::ConnectionClosed)` if the underlying
++    /// writer task has already exited.
++    pub fn send(&self, msg: &[u8]) -> Result<(), TransmitterError> {
+         self.outbox_tx
+             .send(TransportCommand::SendMessage(msg.into()))
+             .map_err(|_| TransmitterError::ConnectionClosed)
+     }
+ 
+-    pub(crate) async fn close(self) {
++    /// Shut down the transport and wait for background tasks to exit.
++    pub async fn close(self) {
+         let _ = self.outbox_tx.send(TransportCommand::Exit);
+         let _ = self.task_inner.await;
+     }
+
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,10 +1,28 @@
+ #[macro_use]
+ #[doc(hidden)]
+ pub mod macros;
+-#[doc(hidden)]
+ pub mod dictionary;
+-#[doc(hidden)]
+ pub mod encoding;
+ mod mcu;
+-#[doc(hidden)]
+ pub mod messages;
+-mod transport;
++pub mod transport;
+ 
+ pub use dictionary::DictionaryError;
+ pub use encoding::MessageDecodeError;
+ pub use mcu::{McuConnection, McuConnectionError, SendReceiveError};
+ pub use messages::EncodedMessage;
++
++// ── Transport layer ─────────────────────────────────────────────────────────
++//
++// Re-exported so downstream crates can use the low-level transport directly
++// without needing to import `windlass::transport::*`.
++
++/// Low-level Klipper transport.  See [`transport::Transport`] for full docs.
++pub use transport::{
++    /// Host-side Klipper transport handle (connect / send / close).
++    Transport,
++    /// Decoded MCU payload receiver paired with a [`Transport`].
++    TransportReceiver,
++    /// Errors that can be reported via [`TransportReceiver`] or returned by
++    /// [`Transport::send`].
++    TransportError,
++    /// Payload encoding error (message too long).
++    MessageEncodeError,
++    /// Low-level receive (IO) errors.
++    ReceiverError,
++    /// Low-level transmit (IO) errors.
++    TransmitterError,
++};
++
++// ── VLQ codec ───────────────────────────────────────────────────────────────
++//
++// Re-exported so callers can build Klipper message payloads without pulling
++// in the internal `encoding` module.
++pub use encoding::{encode_vlq_int, parse_vlq_int};
