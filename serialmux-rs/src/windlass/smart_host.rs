@@ -225,12 +225,11 @@ pub async fn run_smart_host(
 
         tokio::spawn(async move {
             // Wait until the dictionary is available.
+            // `watch::Receiver::changed()` only resolves after the value has
+            // been updated, so the borrow after it always sees the new value.
             let dictionary = loop {
-                if let Some(ref d) = *dict_rx.borrow() {
-                    break Arc::clone(d);
-                }
                 if dict_rx.changed().await.is_err() {
-                    // Sender dropped (should not happen).
+                    // Sender dropped — should not happen in normal operation.
                     return;
                 }
                 if let Some(ref d) = *dict_rx.borrow() {

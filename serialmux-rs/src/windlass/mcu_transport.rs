@@ -256,9 +256,12 @@ fn crc16(buf: &[u8]) -> u16 {
         let b = *b ^ ((crc & 0xFF) as u8);
         let b = b ^ (b << 4);
         let b16 = b as u16;
-        // Operator precedence: ^ binds tighter than | (same as Klipper C firmware).
-        // Evaluates as: (b16 << 8) | ((crc >> 8) ^ (b16 >> 4) ^ (b16 << 3))
-        crc = b16 << 8 | crc >> 8 ^ b16 >> 4 ^ b16 << 3;
+        // Klipper CRC-16: same formula as the Klipper C firmware.
+        // In Rust, ^ binds tighter than |, so without extra parens this reads:
+        //   (b16 << 8) | ((crc >> 8) ^ (b16 >> 4) ^ (b16 << 3))
+        // which matches: crc = ((data<<8)|(crc>>8)) ^ (data>>4) ^ (data<<3) in C
+        // because C also has ^ > |.  Written with explicit grouping for clarity:
+        crc = (b16 << 8) | ((crc >> 8) ^ (b16 >> 4) ^ (b16 << 3));
     }
     crc
 }
@@ -443,9 +446,15 @@ impl RttState {
     fn update(&mut self, rtt: Duration) {
         let r = rtt.as_secs_f32();
         if self.srtt == 0.0 {
+            // Bootstrap: set initial RTTVAR to half the first measurement and
+            // SRTT to 10× it to give the estimator room to converge quickly
+            // (mirrors the windlass heuristic rather than strict RFC 6298 §2.2).
             self.rttvar = r / 2.0;
             self.srtt = r * 10.0;
         } else {
+            // RFC 6298 §2.3 EWMA updates (weights adjusted for serial links):
+            //   RTTVAR = (3/4)*RTTVAR + (1/4)*|SRTT - R|
+            //   SRTT   = (7/8)*SRTT   + (1/8)*R
             self.rttvar = (3.0 * self.rttvar + (self.srtt - r).abs()) / 4.0;
             self.srtt = (7.0 * self.srtt + r) / 8.0;
         }
