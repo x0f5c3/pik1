@@ -130,9 +130,12 @@ pub const CTRL_CH: u8 = 0xFF;
 pub const CTRL_DICT_FRAG: u8 = 0x01;
 /// Control payload type: dictionary transfer complete (no additional bytes).
 pub const CTRL_DICT_DONE: u8 = 0x02;
-/// Maximum dictionary bytes per [`CTRL_DICT_FRAG`] payload
-/// (`255 - 1` byte for the type tag).
-pub const DICT_FRAG_MAX: usize = 254;
+/// Maximum dictionary bytes per [`CTRL_DICT_FRAG`] payload.
+///
+/// A `DICT_FRAG` control payload is `[ type:1 ][ ch_id:1 ][ dict_bytes:n ]`.
+/// The outer [`PayloadTunnelCodec`] limits the total payload to 255 bytes, so
+/// `n ≤ 255 − 2 = 253`.
+pub const DICT_FRAG_MAX: usize = 253;
 
 /// A smart-proxy tunnel packet: decoded Klipper payload bytes tagged with a
 /// channel ID.

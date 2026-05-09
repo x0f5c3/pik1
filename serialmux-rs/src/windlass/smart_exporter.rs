@@ -14,6 +14,8 @@
 //! 3. Reopen the UART and connect a [`windlass::Transport`] for relay mode.
 //! 4. Forward the dictionary to the host over the CDC control channel
 //!    (`ch_id = 0xFF`) as `DICT_FRAG` frames followed by a `DICT_DONE` frame.
+//!    Every frame includes the MCU's `ch_id` so the host can maintain separate
+//!    dictionaries for each channel.
 //! 5. Enter the relay loop:
 //!    - MCU payload received → forward as `[ch_id][len][payload]` over CDC.
 //!    - Command payload received from CDC → send to MCU via `windlass::Transport`.
@@ -26,9 +28,12 @@
 //!
 //! Control channel (`ch_id = 0xFF`):
 //! ```text
-//! DICT_FRAG: [ 0xFF ][ len ][ 0x01 ][ dict_bytes… ]
-//! DICT_DONE: [ 0xFF ][ 0x01 ][ 0x02 ]
+//! DICT_FRAG: [ 0xFF ][ len ][ 0x01 ][ mcu_ch_id ][ dict_bytes… ]
+//! DICT_DONE: [ 0xFF ][ 0x02 ][ 0x02 ][ mcu_ch_id ]
 //! ```
+//! The `mcu_ch_id` byte identifies which MCU channel the dictionary (or
+//! completion marker) belongs to, allowing the host to maintain a separate
+//! per-channel dictionary for multi-MCU setups.
 
 use bytes::Bytes;
 use futures::SinkExt;
@@ -104,8 +109,9 @@ pub async fn run_smart_exporter(
         };
         let (transport, mut payload_rx) = Transport::connect(uart).await;
 
-        // Send the dictionary to the host over the control channel.
-        send_dictionary(&usb_tx, &dictionary)?;
+        // Send the dictionary to the host over the control channel,
+        // tagged with this channel's ch_id so the host routes it correctly.
+        send_dictionary(&usb_tx, ch_id, &dictionary)?;
 
         // Per-channel mpsc for host→MCU command payloads.
         let (uart_cmd_tx, mut uart_cmd_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -198,16 +204,29 @@ pub async fn run_smart_exporter(
 
 /// Encode and send the MCU dictionary over the control channel.
 ///
+/// Every control frame includes `ch_id` so the host can maintain separate
+/// dictionaries for each MCU channel in multi-MCU setups.
+///
 /// The dictionary is split into fragments of up to [`DICT_FRAG_MAX`] bytes
 /// each, sent as `DICT_FRAG` control frames.  A final `DICT_DONE` frame
 /// signals completion to the host.
+///
+/// ## Control payload layout
+///
+/// ```text
+/// DICT_FRAG: [ CTRL_DICT_FRAG ][ ch_id ][ dict_bytes… ]
+/// DICT_DONE: [ CTRL_DICT_DONE ][ ch_id ]
+/// ```
 fn send_dictionary(
     usb_tx: &UnboundedSender<PayloadTunnelFrame>,
+    ch_id: u8,
     dictionary: &[u8],
 ) -> Result<(), Box<dyn std::error::Error>> {
     for chunk in dictionary.chunks(DICT_FRAG_MAX) {
-        let mut payload = Vec::with_capacity(1 + chunk.len());
+        // payload = [ type ][ ch_id ][ dict_bytes… ]
+        let mut payload = Vec::with_capacity(2 + chunk.len());
         payload.push(CTRL_DICT_FRAG);
+        payload.push(ch_id);
         payload.extend_from_slice(chunk);
         usb_tx
             .send(PayloadTunnelFrame {
@@ -216,11 +235,14 @@ fn send_dictionary(
             })
             .map_err(|_| "USB writer task closed")?;
     }
-    // Signal end of dictionary.
+    // Signal end of dictionary for this channel.
+    // Use a stack array and copy_from_slice to avoid a heap allocation for
+    // this 2-byte frame.
+    let done_payload: [u8; 2] = [CTRL_DICT_DONE, ch_id];
     usb_tx
         .send(PayloadTunnelFrame {
             ch_id: CTRL_CH,
-            payload: Bytes::from_static(&[CTRL_DICT_DONE]),
+            payload: Bytes::copy_from_slice(&done_payload),
         })
         .map_err(|_| "USB writer task closed")?;
     Ok(())

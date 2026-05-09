@@ -8,10 +8,11 @@
 //!
 //! 1. Listen on the CDC control channel (`ch_id = 0xFF`) for the MCU's
 //!    compressed dictionary forwarded by the exporter (DICT_FRAG / DICT_DONE
-//!    control frames).
+//!    control frames).  Each frame carries the MCU `ch_id` so the host
+//!    maintains a separate dictionary for every channel.
 //! 2. Bind the Unix socket at the configured path.
-//! 3. When the dictionary is ready, accept Klipper connections in a loop.
-//!    For each connection:
+//! 3. When the dictionary for a given channel is ready, accept Klipper
+//!    connections in a loop.  For each connection:
 //!    a. Create an `anchor::Transport<ProxyConfig>` virtual MCU.
 //!    b. Enter the relay loop (single tokio task per connection):
 //!       - Bytes from the Klipper socket → `transport.receive(…)`.
@@ -37,9 +38,11 @@
 //!
 //! Control channel (`ch_id = 0xFF`):
 //! ```text
-//! DICT_FRAG: [ 0xFF ][ len ][ 0x01 ][ dict_bytes… ]
-//! DICT_DONE: [ 0xFF ][ 0x01 ][ 0x02 ]
+//! DICT_FRAG: [ 0xFF ][ len ][ 0x01 ][ mcu_ch_id ][ dict_bytes… ]
+//! DICT_DONE: [ 0xFF ][ 0x02 ][ 0x02 ][ mcu_ch_id ]
 //! ```
+//! The `mcu_ch_id` byte routes each fragment to the correct per-channel
+//! dictionary accumulator so multi-MCU setups work correctly.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -190,9 +193,17 @@ pub async fn run_smart_host(
     // Control channel for dictionary fragments from the exporter.
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
-    // Watch channel: broadcasts the dictionary to all per-channel accept tasks
-    // once the exporter has sent DICT_DONE.
-    let (dict_watch_tx, dict_watch_rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
+    // Per-channel watch channels: broadcast the dictionary to the matching
+    // accept task once the exporter has sent DICT_DONE for that channel.
+    // Using separate watches (keyed by ch_id) so channels are truly independent
+    // and a multi-MCU exporter can deliver dictionaries in any order.
+    let mut dict_watch_txs: HashMap<u8, watch::Sender<Option<Arc<Vec<u8>>>>> = HashMap::new();
+    let mut dict_watch_rxs: HashMap<u8, watch::Receiver<Option<Arc<Vec<u8>>>>> = HashMap::new();
+    for ch in &channels {
+        let (tx, rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
+        dict_watch_txs.insert(ch.ch_id, tx);
+        dict_watch_rxs.insert(ch.ch_id, rx);
+    }
 
     // Per-channel: slot for routing CDC MCU payloads to the active connection.
     let mut mcu_payload_slots: HashMap<
@@ -208,11 +219,10 @@ pub async fn run_smart_host(
     }
 
     // Task: dictionary gatherer.
-    // Accumulates DICT_FRAG payloads and publishes the result via dict_watch_tx
-    // once DICT_DONE is received.
+    // Routes DICT_FRAG/DICT_DONE control frames to the appropriate per-channel
+    // watch sender based on the `mcu_ch_id` embedded in each control payload.
     tokio::spawn(async move {
-        let dict = gather_dictionary(ctrl_rx).await;
-        let _ = dict_watch_tx.send(Some(Arc::new(dict)));
+        gather_dictionary(ctrl_rx, dict_watch_txs).await;
     });
 
     // Spawn per-channel accept tasks.
@@ -228,10 +238,12 @@ pub async fn run_smart_host(
         };
         let slot = Arc::clone(&mcu_payload_slots[&ch_id]);
         let usb_out = usb_out_tx.clone();
-        let mut dict_rx = dict_watch_rx.clone();
+        let mut dict_rx = dict_watch_rxs
+            .remove(&ch_id)
+            .expect("dict_watch_rx must exist for every channel");
 
         tokio::spawn(async move {
-            // Wait until the dictionary is available.
+            // Wait until this channel's dictionary is available.
             // Check the current value before awaiting so we do not miss a
             // dictionary that was already published before this task started
             // waiting on the watch receiver.
@@ -321,29 +333,60 @@ pub async fn run_smart_host(
 // Dictionary gatherer
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Accumulate `DICT_FRAG` control payloads and return the assembled dictionary
-/// when `DICT_DONE` is received.
-async fn gather_dictionary(mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>) -> Vec<u8> {
-    let mut dict: Vec<u8> = Vec::new();
+/// Accumulate per-channel `DICT_FRAG` control payloads and publish each
+/// channel's complete dictionary via its watch sender when `DICT_DONE` arrives.
+///
+/// Each control payload now includes the MCU `ch_id` as the second byte so
+/// the gatherer can route fragments to the correct per-channel accumulator:
+///
+/// ```text
+/// DICT_FRAG payload: [ CTRL_DICT_FRAG ][ ch_id ][ dict_bytes… ]
+/// DICT_DONE payload: [ CTRL_DICT_DONE ][ ch_id ]
+/// ```
+async fn gather_dictionary(
+    mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>,
+    watch_txs: HashMap<u8, watch::Sender<Option<Arc<Vec<u8>>>>>,
+) {
+    // Per-channel dictionary accumulation buffers.
+    let mut dicts: HashMap<u8, Vec<u8>> = HashMap::new();
+
     while let Some(payload) = ctrl_rx.recv().await {
-        if payload.is_empty() {
+        // Every valid control payload has at least a type byte and a ch_id byte.
+        if payload.len() < 2 {
+            tracing::warn!("windlass-bridge smart host: control payload too short, ignoring");
             continue;
         }
-        match payload[0] {
+        let ctrl_type = payload[0];
+        let mcu_ch_id = payload[1];
+
+        match ctrl_type {
             CTRL_DICT_FRAG => {
-                dict.extend_from_slice(&payload[1..]);
+                dicts
+                    .entry(mcu_ch_id)
+                    .or_default()
+                    .extend_from_slice(&payload[2..]);
             }
             CTRL_DICT_DONE => {
-                tracing::info!(bytes = dict.len(), "windlass-bridge smart host: dictionary ready");
-                return dict;
+                let dict = dicts.remove(&mcu_ch_id).unwrap_or_default();
+                if dict.is_empty() {
+                    tracing::warn!(ch_id = mcu_ch_id,
+                        "windlass-bridge smart host: DICT_DONE received with no preceding DICT_FRAG frames");
+                }
+                tracing::info!(ch_id = mcu_ch_id, bytes = dict.len(),
+                    "windlass-bridge smart host: dictionary ready");
+                if let Some(tx) = watch_txs.get(&mcu_ch_id) {
+                    let _ = tx.send(Some(Arc::new(dict)));
+                } else {
+                    tracing::warn!(ch_id = mcu_ch_id,
+                        "windlass-bridge smart host: DICT_DONE for unknown channel, ignoring");
+                }
             }
             other => {
-                tracing::warn!(ctrl_type = other, "windlass-bridge smart host: unknown control type, ignoring");
+                tracing::warn!(ctrl_type = other,
+                    "windlass-bridge smart host: unknown control type, ignoring");
             }
         }
     }
-    // Control channel closed without DICT_DONE — return whatever we have.
-    dict
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
