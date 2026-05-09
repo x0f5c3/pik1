@@ -12,12 +12,9 @@
 //! `mpsc::UnboundedSender<TunnelFrame>` that feeds a single dedicated writer
 //! task — this serialises writes without any per-frame locking.
 //!
-//! # Future work
-//!
-//! The `windlass` crate (`windlass::McuConnection`) is an optional dependency
-//! that can be used here for initial MCU dictionary verification and protocol
-//! monitoring before the relay loop starts.  It is not used in the current
-//! transparent-relay implementation.
+//! For transport-terminating behavior and dictionary forwarding, use
+//! [`crate::windlass::smart_exporter`]. This module remains the transparent
+//! relay path that forwards complete raw Klipper frames over the USB tunnel.
 
 use std::collections::HashMap;
 

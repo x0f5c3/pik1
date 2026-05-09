@@ -6,15 +6,22 @@
 //! # Architecture
 //!
 //! ```text
-//! K1C SoC (exporter):
-//!   ttyS7 ──► [KlipperFramer] ──► ch_id prefix ──► CDC ACM
+//! Transparent relay:
+//!   K1C SoC (exporter):
+//!     ttyS7 ──► [KlipperFramer] ──► ch_id prefix ──► CDC ACM
 //!
-//! Pi/CB1 (host):
-//!   CDC ACM ──► [TunnelCodec] ──► demux by ch_id
-//!                                      │
-//!                                      ▼
-//!                              Unix socket → Klipper
+//!   Pi/CB1 (host):
+//!     CDC ACM ──► [TunnelCodec] ──► demux by ch_id
+//!                                        │
+//!                                        ▼
+//!                                Unix socket → Klipper
 //! ```
+//!
+//! Smart proxy:
+//! - [`smart_exporter`] terminates the MCU UART transport and forwards decoded
+//!   payloads plus the raw compressed dictionary.
+//! - [`smart_host`] terminates Klipper's transport with `anchor` and answers
+//!   `identify` locally.
 //!
 //! ## Tunnel wire format
 //!
@@ -35,14 +42,7 @@
 //! Users who require TCP channel tunnelling (e.g. grumpyscreen → Moonraker)
 //! must continue using the `serialmux` binary.
 //!
-//! ## Future work
-//!
-//! The `windlass` crate (host-side Klipper protocol) and `anchor` crate
-//! (MCU-side Klipper protocol) are included as dependencies and are
-//! intended for future enhancements such as:
-//! - MCU dictionary inspection and command filtering on the exporter
-//! - A true virtual MCU on the host side (anchor-based) that terminates
-//!   the Klipper transport independently of the USB link reliability
+//! The remaining upstream follow-up items are tracked in `patches/`.
 
 pub mod async_serial;
 pub mod exporter;

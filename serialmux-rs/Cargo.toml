@@ -41,9 +41,9 @@ nix       = { version = "0.31", features = [
 libc      = "0.2"
 
 # --- windlass feature dependencies (optional) --------------------------------
-# windlass: host-side Klipper protocol (future: MCU monitoring, filtering).
+# windlass: host-side Klipper transport, used by smart-proxy exporter helpers.
 windlass   = { git = "https://github.com/x0f5c3/windlass", optional = true }
-# anchor: MCU-side Klipper protocol (future: virtual MCU on host side).
+# anchor: MCU-side Klipper protocol, used by the smart-proxy host.
 anchor     = { git = "https://github.com/x0f5c3/anchor", features = ["std"], optional = true }
 futures    = { version = "0.3", optional = true }
 tokio      = { version = "1", features = ["full"], optional = true }

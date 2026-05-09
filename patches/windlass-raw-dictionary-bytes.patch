@@ -1,0 +1,88 @@
+From: pik1 smart-proxy follow-up
+Date: 2026-05-09
+Subject: [PATCH] feat: retain raw MCU dictionary bytes on McuConnection
+
+## Motivation
+
+`serialmux-rs` now consumes the public low-level `windlass::Transport`, so the
+old transport copy is gone. The remaining gap on the exporter side is that the
+high-level `McuConnection::connect` path parses the MCU dictionary and drops the
+original compressed bytes.
+
+The smart exporter needs those original bytes so it can forward them to the
+host, which then answers `identify` locally. Adding a borrowed accessor keeps
+the high-level API usable for both the bootstrap phase and the steady-state
+relay phase.
+
+## What changes
+
+### `src/mcu.rs`
+- Store the compressed `identify` payload bytes alongside the parsed
+  `Dictionary`.
+- Add `McuConnection::raw_dictionary_bytes() -> &[u8]`.
+
+This is additive and keeps the current `connect` behavior unchanged.
+
+## Impact on pik1/serialmux-rs
+
+After applying this patch, the smart exporter can switch from:
+
+```rust
+let (transport, mut payload_rx) = Transport::connect(uart).await;
+let dictionary = fetch_dictionary(&transport, &mut payload_rx).await?;
+```
+
+to:
+
+```rust
+let conn = McuConnection::connect(uart).await?;
+let dictionary = conn.raw_dictionary_bytes();
+```
+
+That removes the last exporter-side need for the low-level transport helper.
+
+---
+
+diff --git a/src/mcu.rs b/src/mcu.rs
+--- a/src/mcu.rs
++++ b/src/mcu.rs
+@@ -153,6 +153,7 @@ struct McuConnectionInner {
+ struct McuConnectionInner {
+     dictionary: OnceCell<Dictionary>,
++    raw_dictionary_bytes: OnceCell<Vec<u8>>,
+     handlers: Handlers,
+     good_types: Mutex<BTreeSet<TypeId>>,
+ }
+@@ -256,6 +257,7 @@ impl McuConnection {
+         let inner = Arc::new(McuConnectionInner {
+             dictionary: OnceCell::new(),
++            raw_dictionary_bytes: OnceCell::new(),
+             handlers: Handlers::default(),
+             good_types: Mutex::default(),
+         });
+@@ -295,6 +297,10 @@ impl McuConnection {
+                 identify_data.append(&mut data.data);
+             }
+         }
++        conn.inner
++            .raw_dictionary_bytes
++            .set(identify_data.clone())
++            .expect("raw dictionary bytes already set");
+         let mut decoder = flate2::read::ZlibDecoder::new(identify_data.as_slice());
+         let mut buf = Vec::new();
+         decoder
+@@ -313,6 +319,14 @@ impl McuConnection {
+ 
+         Ok(conn)
+     }
++
++    /// Return the raw compressed dictionary bytes fetched during [`Self::connect`].
++    ///
++    /// These are the concatenated `identify_response.data` chunks before zlib
++    /// decompression and JSON parsing.
++    pub fn raw_dictionary_bytes(&self) -> &[u8] {
++        self.inner.raw_dictionary_bytes.get().map(Vec::as_slice).unwrap()
++    }
+ 
+     fn verify_command_matches<C: Message>(&self) -> Result<(), McuConnectionError> {
+         // Special handling for identify/identify_response

@@ -31,13 +31,9 @@
 //! USB reader ──► TunnelFrame ──► demux ──► raw bytes → socket write
 //! ```
 //!
-//! # Future work
-//!
-//! The `anchor` crate can be used here to implement a virtual MCU that
-//! terminates the Klipper transport (ACK/NAK, sequence numbering) on the
-//! host side independently of the USB link.  That would allow the host to
-//! buffer MCU responses during USB reconnects and replay them to Klipper
-//! without triggering a full Klipper restart.
+//! For transport-terminating behavior, use [`crate::windlass::smart_host`].
+//! This module remains the transparent relay path that forwards complete raw
+//! Klipper frames over the USB tunnel.
 
 use std::collections::HashMap;
 use std::sync::Arc;

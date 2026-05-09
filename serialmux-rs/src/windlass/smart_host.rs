@@ -43,7 +43,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anchor::OutputBuffer as _;
+use anchor::{
+    Config, OutputBuffer as _, ReadError, Readable, ShutdownState, Transport, TransportOutput,
+    Writable as _,
+};
 use bytes::Bytes;
 use futures::SinkExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -52,8 +55,6 @@ use tokio::select;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
-
-use anchor::encoding::Writable as _;
 
 use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
@@ -82,7 +83,7 @@ struct ProxyContext<'c> {
     pending_responses: &'c mut Vec<Vec<u8>>,
 }
 
-impl anchor::ShutdownState for ProxyContext<'_> {
+impl ShutdownState for ProxyContext<'_> {
     fn is_shutdown(&self) -> bool {
         false
     }
@@ -92,7 +93,7 @@ impl anchor::ShutdownState for ProxyContext<'_> {
 /// mpsc channel connected to the Klipper socket writer task.
 struct ChannelOutput(UnboundedSender<Vec<u8>>);
 
-impl anchor::TransportOutput for ChannelOutput {
+impl TransportOutput for ChannelOutput {
     type Output = Vec<u8>;
 
     fn output(&self, f: impl FnOnce(&mut Vec<u8>)) {
@@ -107,7 +108,7 @@ impl anchor::TransportOutput for ChannelOutput {
 /// Klipper fixed command ID for `identify`.
 const CMD_IDENTIFY: u16 = 1;
 
-impl anchor::transport::Config for ProxyConfig {
+impl Config for ProxyConfig {
     type TransportOutput = ChannelOutput;
     type Context<'c> = ProxyContext<'c>;
 
@@ -115,11 +116,11 @@ impl anchor::transport::Config for ProxyConfig {
         cmd: u16,
         frame: &mut &[u8],
         ctx: &mut ProxyContext<'c>,
-    ) -> Result<(), anchor::encoding::ReadError> {
+    ) -> Result<(), ReadError> {
         if cmd == CMD_IDENTIFY {
             // identify(offset: u32, count: u8)
-            let offset = <u32 as anchor::encoding::Readable>::read(frame)?;
-            let count = <u8 as anchor::encoding::Readable>::read(frame)? as usize;
+            let offset = <u32 as Readable>::read(frame)?;
+            let count = <u8 as Readable>::read(frame)? as usize;
 
             let dict = ctx.dictionary;
             let start = offset as usize;
@@ -128,10 +129,8 @@ impl anchor::transport::Config for ProxyConfig {
 
             // Build identify_response payload:
             // [cmd=0 VLQ][offset VLQ][data_len VLQ][data bytes]
-            // Uses anchor::encoding::Writable (already public in anchor's std
-            // feature) to write VLQ-encoded integers into a Vec<u8>
-            // OutputBuffer.  This removes the dependency on our local
-            // encode_vlq copy in mcu_transport.rs.
+            // Uses the root-level anchor::Writable re-export to write
+            // VLQ-encoded integers into a Vec<u8> OutputBuffer.
             let mut resp = Vec::new();
             (0u32).write(&mut resp);               // cmd = 0 (identify_response)
             offset.write(&mut resp);               // offset
@@ -397,7 +396,7 @@ async fn handle_klipper_smart_connection(
     }
 
     // Create the anchor virtual MCU transport.
-    let transport = anchor::Transport::<ProxyConfig>::new(
+    let transport = Transport::<ProxyConfig>::new(
         &PROXY_CONFIG,
         ChannelOutput(to_klipper_tx),
     );

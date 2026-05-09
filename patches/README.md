@@ -1,143 +1,82 @@
-# Smart-proxy: windlass + anchor improvement opportunities
+# Smart-proxy: remaining upstream follow-up patches
 
-This document describes what else the smart-proxy (`windlass-bridge --smart`)
-can gain from improvements in the `windlass` and `anchor` upstream crates,
-and which copies of upstream code exist only because of `pub(crate)` barriers.
+The previously documented visibility changes have landed in the upstream
+`windlass` and `anchor` repositories. `serialmux-rs` now uses those public APIs
+directly.
 
-The two patch files in this directory fully address the visibility gaps:
+The two remaining upstream improvements tracked here are:
 
 | Patch file | Crate | What it unlocks |
 |---|---|---|
-| `windlass-expose-transport.patch` | `x0f5c3/windlass` | Remove 400-line `mcu_transport.rs` copy |
-| `anchor-export-config.patch` | `x0f5c3/anchor` | Clean top-level imports in `smart_host.rs` |
+| `windlass-raw-dictionary-bytes.patch` | `x0f5c3/windlass` | Use `McuConnection::connect` on the smart exporter |
+| `anchor-dispatch-raw.patch` | `x0f5c3/anchor` | Forward non-`identify` commands without re-encoding the command ID |
 
 ---
 
-## 1. The main blocker: `windlass::Transport` is `pub(crate)`
-
-### What is copied today
-
-`serialmux-rs/src/windlass/mcu_transport.rs` (~400 lines) is a near-verbatim
-copy of `windlass/src/transport.rs`.  The comment at the top of that file
-explains this explicitly.  The copy includes:
-
-- `LowlevelReader` — byte-by-byte frame parser (sync, length, seq, CRC-16)
-- `LowlevelWriter` — async frame writer
-- `TransportState` — ACK/NAK + retransmit state machine (RFC 6298 RTT)
-- `encode_frame` — CRC + seq framer
-- `encode_vlq` / `parse_vlq` — VLQ integer codec
-
-### Why it exists
-
-`windlass::Transport` and `windlass::TransportReceiver` are `pub(crate)`.
-`windlass::encoding::encode_vlq_int` and `parse_vlq_int` are also `pub(crate)`.
-These are the only two things preventing us from using windlass directly.
-
-### What the patch does
-
-`patches/windlass-expose-transport.patch` makes all five symbols public and
-re-exports them at the crate root.  Applying it lets us:
-
-1. **Delete `mcu_transport.rs` entirely** (except `fetch_dictionary`).
-2. Replace `McuTransport` with `windlass::Transport` everywhere.
-3. Replace `McuPayloadReceiver` with `windlass::TransportReceiver`.
-4. Replace `encode_vlq` / `parse_vlq` with `windlass::encode_vlq_int` /
-   `windlass::parse_vlq_int`.
-
-The `fetch_dictionary` function itself stays (it contains real logic: the
-`identify`/`identify_response` exchange loop), but it shrinks from ~70 lines
-to ~30 because it no longer has to build `identify` payloads from scratch —
-it uses `windlass::encode_vlq_int` directly.
-
----
-
-## 2. Dictionary bytes vs. parsed Dictionary
+## 1. `windlass`: retain raw dictionary bytes
 
 ### Current situation
 
-`McuConnection::connect` (the high-level windlass API) fetches and **parses**
-the MCU dictionary.  After it returns, the raw compressed bytes are gone —
-only the parsed `Dictionary` struct survives.
+`serialmux-rs/src/windlass/smart_exporter.rs` already uses the public
+`windlass::Transport` and VLQ helpers. The only remaining local helper is
+`serialmux-rs/src/windlass/mcu_transport.rs::fetch_dictionary`, because
+`McuConnection::connect` keeps only the parsed dictionary and discards the raw
+compressed bytes.
 
-The smart proxy needs the **raw compressed bytes** (to forward them over the
-tunnel to the host so it can answer `identify` locally).  That is why we
-call `McuTransport::connect` + `fetch_dictionary` instead of
-`McuConnection::connect`.
-
-### Optional future windlass improvement
-
-Adding `McuConnection::raw_dictionary_bytes() -> &[u8]` would allow using
-the high-level API for both the dictionary fetch and the relay phase.  The
-method would cache the compressed bytes alongside the parsed `Dictionary`.
-This is not strictly required (our thin `fetch_dictionary` wrapper works
-fine), but it would give the high-level API a complete picture and remove
-the need to use the low-level `Transport` at all from the exporter.
-
----
-
-## 3. Anchor: `Config`, `Readable`, `Writable` behind `#[doc(hidden)]`
-
-### Current situation
-
-`smart_host.rs` currently uses:
-```rust
-use anchor::transport::Config;
-use anchor::encoding::{ReadError, Readable};
-use anchor::encoding::Writable as _;
-```
-
-These all work (the modules are `pub mod`, just `#[doc(hidden)]`), but the
-import paths are non-obvious and invisible in rustdoc.
+The smart host needs those raw bytes so it can answer `identify` locally.
 
 ### What the patch does
 
-`patches/anchor-export-config.patch` removes `#[doc(hidden)]` from the
-public modules and adds `pub use` re-exports at the crate root:
+`patches/windlass-raw-dictionary-bytes.patch` stores the compressed
+`identify_response.data` bytes on `McuConnection` and adds:
 
 ```rust
-use anchor::{Config, ReadError, Readable, Writable};
+pub fn raw_dictionary_bytes(&self) -> &[u8]
 ```
 
-This is a documentation and ergonomics improvement only; no logic changes.
+That lets the smart exporter switch to the high-level connection path and drop
+the remaining dictionary bootstrap helper.
 
 ---
 
-## 4. Already-working improvement applied in this commit
+## 2. `anchor`: add `Config::dispatch_raw`
 
-`smart_host.rs` previously imported `encode_vlq` from our local
-`mcu_transport` module:
+### Current situation
 
+`serialmux-rs/src/windlass/smart_host.rs` already uses the root-level `anchor`
+re-exports:
 ```rust
-use crate::windlass::mcu_transport::encode_vlq;
-// ...
-encode_vlq(&mut resp, 0);      // cmd = 0
-encode_vlq(&mut resp, offset);
+use anchor::{Config, ReadError, Readable, Writable as _};
 ```
 
-`anchor::encoding::Writable` is already publicly accessible and `Vec<u8>`
-already implements `anchor::OutputBuffer` (under the `std` feature).  So the
-local copy is **completely unnecessary today** — the trait just needed to be
-brought into scope.  This commit makes that change:
+However, proxying unknown commands still requires reading the command ID and
+rebuilding it into a new payload before forwarding. That is only because
+`anchor::Transport` currently calls `Config::dispatch(cmd, ...)` after decoding
+the leading VLQ command ID internally.
+
+### What the patch does
+
+`patches/anchor-dispatch-raw.patch` adds:
 
 ```rust
-use anchor::encoding::Writable as _;
-// ...
-(0u32).write(&mut resp);    // cmd = 0
-offset.write(&mut resp);
+fn dispatch_raw<'c>(frame: &mut &[u8], context: &mut Self::Context<'c>)
 ```
 
-`encode_vlq` and `parse_vlq` in `mcu_transport.rs` are now private (`fn`,
-not `pub(crate) fn`) and carry doc comments explaining that they are
-temporary copies pending the windlass patch.
+with a default implementation that preserves today's behavior by decoding the
+command ID and delegating to `dispatch`.
+
+With that hook available, the smart host can inspect `identify` locally and
+forward every other command as raw bytes.
 
 ---
 
-## 5. Summary of all improvements
+## 3. Local code status after the upstream visibility changes
 
-| # | Status | Description |
-|---|---|---|
-| 1 | **Done in this commit** | `smart_host.rs` uses `anchor::Writable` instead of local `encode_vlq` copy |
-| 2 | **Patch provided** | `windlass`: expose `Transport`, `TransportReceiver`, `encode_vlq_int`, `parse_vlq_int` |
-| 3 | **Patch provided** | `anchor`: promote `Config`, `Readable`, `Writable`, `ReadError` to top-level exports |
-| 4 | Future (optional) | `windlass`: add `McuConnection::raw_dictionary_bytes()` to avoid needing low-level Transport at all |
-| 5 | Future (optional) | `anchor`: add `Config::dispatch_raw` hook for unrecognised commands to avoid partial VLQ parse in dispatch |
+The current `serialmux-rs` tree is already aligned to the upstream public APIs:
+
+1. `smart_exporter.rs` uses `windlass::Transport`.
+2. `mcu_transport.rs` is now only a thin dictionary bootstrap helper.
+3. `smart_host.rs` uses the root-level `anchor::{Config, ReadError, Readable, Writable}` exports.
+
+The patch files in this directory cover only the two remaining optional
+upstream improvements above.

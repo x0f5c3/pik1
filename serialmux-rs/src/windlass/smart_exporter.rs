@@ -8,14 +8,14 @@
 //!
 //! # Startup sequence per channel
 //!
-//! 1. Open the UART and connect a [`McuTransport`].
+//! 1. Open the UART and connect a [`windlass::Transport`].
 //! 2. Perform the `identify`/`identify_response` exchange to obtain the MCU's
 //!    compressed data dictionary.
 //! 3. Forward the dictionary to the host over the CDC control channel
 //!    (`ch_id = 0xFF`) as `DICT_FRAG` frames followed by a `DICT_DONE` frame.
 //! 4. Enter the relay loop:
 //!    - MCU payload received → forward as `[ch_id][len][payload]` over CDC.
-//!    - Command payload received from CDC → send to MCU via `McuTransport`.
+//!    - Command payload received from CDC → send to MCU via `windlass::Transport`.
 //!
 //! # Tunnel wire format
 //!
@@ -31,16 +31,17 @@
 
 use bytes::Bytes;
 use futures::SinkExt;
-use tokio::io::{split};
+use tokio::io::split;
 use tokio::sync::mpsc::{self, UnboundedSender};
-use tokio_util::codec::{FramedWrite};
+use tokio_util::codec::FramedWrite;
+use windlass::Transport;
 
 use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
     CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX, PayloadTunnelCodec, PayloadTunnelFrame,
 };
-use crate::windlass::mcu_transport::{McuTransport, fetch_dictionary};
+use crate::windlass::mcu_transport::fetch_dictionary;
 
 /// Run the smart-proxy exporter event loop.
 ///
@@ -87,7 +88,7 @@ pub async fn run_smart_exporter(
             }
         };
 
-        let (transport, mut payload_rx) = McuTransport::connect(uart).await;
+        let (transport, mut payload_rx) = Transport::connect(uart).await;
 
         // Fetch the MCU dictionary before entering relay mode.
         eprintln!(
@@ -126,7 +127,7 @@ pub async fn run_smart_exporter(
         tokio::spawn(async move {
             loop {
                 match payload_rx.recv().await {
-                    Some(payload) => {
+                    Some(Ok(payload)) => {
                         let frame = PayloadTunnelFrame {
                             ch_id,
                             payload: Bytes::from(payload),
@@ -134,6 +135,13 @@ pub async fn run_smart_exporter(
                         if usb_tx_clone.send(frame).is_err() {
                             break;
                         }
+                    }
+                    Some(Err(e)) => {
+                        eprintln!(
+                            "windlass-bridge smart exporter: ch{} MCU transport error: {}",
+                            ch_id, e
+                        );
+                        break;
                     }
                     None => {
                         eprintln!(
@@ -147,10 +155,16 @@ pub async fn run_smart_exporter(
         });
 
         // Task: USB → MCU.
-        // Command payloads from the host are sent to the MCU via McuTransport.
+        // Command payloads from the host are sent to the MCU via windlass::Transport.
         tokio::spawn(async move {
             while let Some(payload) = uart_cmd_rx.recv().await {
-                transport.send(payload);
+                if let Err(e) = transport.send(&payload) {
+                    eprintln!(
+                        "windlass-bridge smart exporter: ch{} MCU send error: {}",
+                        ch_id, e
+                    );
+                    break;
+                }
             }
         });
     }
