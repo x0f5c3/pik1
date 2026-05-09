@@ -222,10 +222,8 @@ pub async fn run_smart_host(
         let listener = match UnixListener::bind(&socket_path) {
             Ok(l) => l,
             Err(e) => {
-                // socket was already bound in the first loop via
-                // prepare_socket_path; if that raced, just skip.
                 tracing::error!(ch_id, socket = %socket_path, err = %e, "windlass-bridge smart host: bind error");
-                continue;
+                return Err(e.into());
             }
         };
         let slot = Arc::clone(&mcu_payload_slots[&ch_id]);
@@ -234,15 +232,16 @@ pub async fn run_smart_host(
 
         tokio::spawn(async move {
             // Wait until the dictionary is available.
-            // `watch::Receiver::changed()` only resolves after the value has
-            // been updated, so the borrow after it always sees the new value.
+            // Check the current value before awaiting so we do not miss a
+            // dictionary that was already published before this task started
+            // waiting on the watch receiver.
             let dictionary = loop {
+                if let Some(ref d) = *dict_rx.borrow() {
+                    break Arc::clone(d);
+                }
                 if dict_rx.changed().await.is_err() {
                     // Sender dropped — should not happen in normal operation.
                     return;
-                }
-                if let Some(ref d) = *dict_rx.borrow() {
-                    break Arc::clone(d);
                 }
             };
 

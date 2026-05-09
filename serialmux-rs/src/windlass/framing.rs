@@ -96,6 +96,12 @@ impl Decoder for TunnelCodec {
                 return Ok(None);
             }
 
+            if src[total - 1] != MESSAGE_VALUE_SYNC {
+                // Bad trailing sync byte — skip one byte and re-try.
+                src.advance(1);
+                continue;
+            }
+
             src.advance(1); // consume ch_id
             let frame = src.split_to(frame_len).freeze();
             return Ok(Some(TunnelFrame { ch_id, frame }));

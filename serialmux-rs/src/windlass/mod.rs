@@ -25,16 +25,30 @@
 //!
 //! ## Tunnel wire format
 //!
-//! Every packet on the CDC ACM link is a single **tunnel frame**:
+//! The CDC ACM link carries different tunnel frame formats depending on the
+//! operating mode:
+//!
+//! Transparent relay:
 //!
 //! ```text
 //! [ ch_id : u8 ][ raw Klipper frame : 5..=64 bytes ]
 //! ```
 //!
 //! The raw Klipper frame is self-delimiting: its first byte is the total
-//! frame length (5–64), and its last byte is always `0x7E` (sync).  No
+//! frame length (5–64), and its last byte is always `0x7E` (sync). No
 //! additional magic bytes, length prefixes, or CRCs are added by the
-//! tunnel layer; Klipper's own CRC-16 already covers frame integrity.
+//! tunnel layer in this mode; Klipper's own CRC-16 already covers frame
+//! integrity.
+//!
+//! Smart proxy:
+//!
+//! ```text
+//! [ ch_id : u8 ][ payload_len : u8 ][ payload : 0..=255 bytes ]
+//! ```
+//!
+//! In smart-proxy mode, the tunnel transports decoded payload bytes rather
+//! than full raw Klipper frames. `payload_len` gives the number of payload
+//! bytes that follow for the selected channel.
 //!
 //! ## Compatibility
 //!
