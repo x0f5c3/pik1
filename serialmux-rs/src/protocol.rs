@@ -64,7 +64,7 @@ const PARSER_BUF_CAP: usize = MAX_FRAME + 64;
 pub fn build_frame(ftype: u8, channel: u8, payload: &[u8]) -> Vec<u8> {
     let length = payload.len();
     assert!(
-        length <= MAX_PAYLOAD && length <= u16::MAX as usize,
+        length <= MAX_PAYLOAD,
         "frame payload length {} exceeds protocol maximum {}",
         length,
         MAX_PAYLOAD

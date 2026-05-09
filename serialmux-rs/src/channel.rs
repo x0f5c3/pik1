@@ -28,7 +28,7 @@ use crate::serial::{
 // Token layout
 // ─────────────────────────────────────────────────────────────────────────────
 // Token(0)               – link fd (managed by Daemon)
-// Token(1..=63)          – channel primary fd  (channel N → token N+1, N=0..62)
+// Token(1..=63)          – channel primary fd  (channel N → token N+1, N=0..=MAX_CHANNEL_ID)
 // Token(TCP_BASE + N*MAX_TCP_CONNS + slot) – TCP connection slot for channel N
 // ─────────────────────────────────────────────────────────────────────────────
 
