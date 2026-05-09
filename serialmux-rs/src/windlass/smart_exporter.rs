@@ -36,12 +36,12 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::codec::FramedWrite;
 use windlass::Transport;
 
-use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
-    CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX, PayloadTunnelCodec, PayloadTunnelFrame,
+    PayloadTunnelCodec, PayloadTunnelFrame, CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX,
 };
 use crate::windlass::mcu_transport::fetch_dictionary;
+use crate::windlass::McuSpec;
 
 /// Run the smart-proxy exporter event loop.
 ///

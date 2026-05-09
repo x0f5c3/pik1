@@ -85,8 +85,7 @@ pub fn find_acm_by_usb_id(vid: &str, pid: &str) -> Option<String> {
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
-        let mut cur = std::fs::canonicalize(entry.path())
-            .unwrap_or_else(|_| entry.path());
+        let mut cur = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
 
         for _ in 0..8 {
             let vendor_p = cur.join("idVendor");
@@ -137,10 +136,7 @@ pub fn wait_for_acm(vid: &str, pid: &str) -> String {
 /// Resolve a link device: either a direct path or a USB-discovered path.
 ///
 /// Blocks until the device appears if USB discovery is requested.
-pub fn resolve_link_device(
-    link_dev: Option<&str>,
-    usb_id: Option<(&str, &str)>,
-) -> String {
+pub fn resolve_link_device(link_dev: Option<&str>, usb_id: Option<(&str, &str)>) -> String {
     if let Some(dev) = link_dev {
         return dev.to_string();
     }

@@ -12,7 +12,7 @@
 use std::{io, time::Duration};
 
 use tokio::time::timeout;
-use windlass::{Transport, TransportReceiver, encode_vlq_int, parse_vlq_int};
+use windlass::{encode_vlq_int, parse_vlq_int, Transport, TransportReceiver};
 
 const CMD_IDENTIFY: u32 = 1;
 const CMD_IDENTIFY_RESPONSE: u32 = 0;

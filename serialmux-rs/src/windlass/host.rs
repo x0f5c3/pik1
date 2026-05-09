@@ -40,15 +40,15 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncWriteExt, split};
+use tokio::io::{split, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{mpsc, Mutex};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{KlipperFramer, TunnelCodec, TunnelFrame};
 use crate::windlass::prepare_socket_path;
+use crate::windlass::McuSpec;
 
 /// Run the host event loop.
 ///
@@ -71,10 +71,8 @@ pub async fn run_host(
     // USB to the current Klipper client on that channel's socket.
     // Wrapped in Arc<Mutex<Option<…>>> so socket tasks can replace the
     // sender when Klipper reconnects.
-    let mut klipper_write_txs: HashMap<
-        u8,
-        Arc<Mutex<Option<mpsc::UnboundedSender<Bytes>>>>,
-    > = HashMap::new();
+    let mut klipper_write_txs: HashMap<u8, Arc<Mutex<Option<mpsc::UnboundedSender<Bytes>>>>> =
+        HashMap::new();
 
     for ch in channels {
         let ch_id = ch.ch_id;
@@ -118,10 +116,7 @@ pub async fn run_host(
                         );
                     }
                     Err(e) => {
-                        eprintln!(
-                            "windlass-bridge host: ch{} accept error: {}",
-                            ch_id, e
-                        );
+                        eprintln!("windlass-bridge host: ch{} accept error: {}", ch_id, e);
                         // Brief pause before retrying.
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
@@ -220,10 +215,7 @@ async fn handle_klipper_connection(
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "windlass-bridge host: ch{} socket read error: {}",
-                        ch_id, e
-                    );
+                    eprintln!("windlass-bridge host: ch{} socket read error: {}", ch_id, e);
                     break;
                 }
             }

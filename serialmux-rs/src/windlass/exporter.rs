@@ -20,13 +20,13 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{AsyncWriteExt, split};
+use tokio::io::{split, AsyncWriteExt};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
-use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{KlipperFramer, TunnelCodec, TunnelFrame};
+use crate::windlass::McuSpec;
 
 /// Run the exporter event loop.
 ///
@@ -39,10 +39,7 @@ pub async fn run_exporter(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "windlass-bridge exporter: opening USB link {}",
-        link_device
-    );
+    eprintln!("windlass-bridge exporter: opening USB link {}", link_device);
 
     // Open the USB CDC device.  Baud = 0 means "skip cfsetspeed" — CDC ACM
     // ignores baud, so we just need the raw non-blocking fd.
@@ -104,10 +101,7 @@ pub async fn run_exporter(
                         break;
                     }
                     None => {
-                        eprintln!(
-                            "windlass-bridge exporter: ch{} UART stream ended",
-                            ch_id
-                        );
+                        eprintln!("windlass-bridge exporter: ch{} UART stream ended", ch_id);
                         break;
                     }
                 }

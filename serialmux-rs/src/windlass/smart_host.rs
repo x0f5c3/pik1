@@ -56,12 +56,12 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 
-use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
-    CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, PayloadTunnelCodec, PayloadTunnelFrame,
+    PayloadTunnelCodec, PayloadTunnelFrame, CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG,
 };
 use crate::windlass::prepare_socket_path;
+use crate::windlass::McuSpec;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // anchor Config implementation
@@ -125,15 +125,19 @@ impl Config for ProxyConfig {
             let dict = ctx.dictionary;
             let start = offset as usize;
             let end = (start + count).min(dict.len());
-            let chunk = if start <= dict.len() { &dict[start..end] } else { &[] };
+            let chunk = if start <= dict.len() {
+                &dict[start..end]
+            } else {
+                &[]
+            };
 
             // Build identify_response payload:
             // [cmd=0 VLQ][offset VLQ][data_len VLQ][data bytes]
             // Uses the root-level anchor::Writable re-export to write
             // VLQ-encoded integers into a Vec<u8> OutputBuffer.
             let mut resp = Vec::new();
-            (0u32).write(&mut resp);               // cmd = 0 (identify_response)
-            offset.write(&mut resp);               // offset
+            (0u32).write(&mut resp); // cmd = 0 (identify_response)
+            offset.write(&mut resp); // offset
             (chunk.len() as u32).write(&mut resp); // data_len
             resp.extend_from_slice(chunk);
             ctx.pending_responses.push(resp);
@@ -164,7 +168,10 @@ pub async fn run_smart_host(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("windlass-bridge smart host: opening USB link {}", link_device);
+    eprintln!(
+        "windlass-bridge smart host: opening USB link {}",
+        link_device
+    );
 
     let usb = open_serial(&link_device, 0)?;
     let (usb_read, usb_write) = tokio::io::split(usb);
@@ -177,8 +184,7 @@ pub async fn run_smart_host(
 
     // Watch channel: broadcasts the dictionary to all per-channel accept tasks
     // once the exporter has sent DICT_DONE.
-    let (dict_watch_tx, dict_watch_rx) =
-        watch::channel::<Option<Arc<Vec<u8>>>>(None);
+    let (dict_watch_tx, dict_watch_rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
 
     // Per-channel: slot for routing CDC MCU payloads to the active connection.
     let mut mcu_payload_slots: HashMap<
@@ -193,10 +199,7 @@ pub async fn run_smart_host(
             "windlass-bridge smart host: ch{} binding Unix socket {}",
             ch_id, ch.path
         );
-        mcu_payload_slots.insert(
-            ch_id,
-            Arc::new(tokio::sync::Mutex::new(None)),
-        );
+        mcu_payload_slots.insert(ch_id, Arc::new(tokio::sync::Mutex::new(None)));
     }
 
     // Task: dictionary gatherer.
@@ -250,10 +253,7 @@ pub async fn run_smart_host(
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
-                        eprintln!(
-                            "windlass-bridge smart host: ch{} Klipper connected",
-                            ch_id
-                        );
+                        eprintln!("windlass-bridge smart host: ch{} Klipper connected", ch_id);
                         handle_klipper_smart_connection(
                             ch_id,
                             stream,
@@ -396,10 +396,7 @@ async fn handle_klipper_smart_connection(
     }
 
     // Create the anchor virtual MCU transport.
-    let transport = Transport::<ProxyConfig>::new(
-        &PROXY_CONFIG,
-        ChannelOutput(to_klipper_tx),
-    );
+    let transport = Transport::<ProxyConfig>::new(&PROXY_CONFIG, ChannelOutput(to_klipper_tx));
 
     let (sock_read, mut sock_write) = tokio::io::split(stream);
     let mut sock_read = tokio::io::BufReader::new(sock_read);
