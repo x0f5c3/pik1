@@ -6,9 +6,9 @@
 
 ## Overview
 
-`serialmux.py` is a Python client/server daemon that multiplexes MCU serial ports
-and tcp listener forwardings over a single USB CDC ACM link between, in this case,
-a Creality K1 and Raspberry Pi (or any two linux devices).
+`serialmux` is a C daemon that multiplexes MCU serial ports and TCP listener
+forwardings over a single USB CDC ACM link between, in this case, a Creality K1
+and Raspberry Pi (or any two Linux devices).
 
 The TCP tunnel option is used in the case where you need to expose a Moonraker
 listener port backwards over the tunnel to the MCU exporting machine, and should
@@ -65,30 +65,29 @@ bandwidth for the MCU links.
 
 ## Software
 
-The following files are required. Place them as described in each section below:
+The following files are involved:
 
-- `serialmux.py` -- the main daemon (runs on both K1 and Pi)
+- `src/` -- C source for `serialmux` (runs on both K1 and Pi)
 - `S99pik1` -- K1 init script
 - `setup_pik1.sh` -- Pi gadget setup script
-- `pik1.service` -- Pi systemd service
+- `pik1.service.in` -- Pi systemd service template
+
+### Building
+
+Pre-built binaries for K1 (`build/serialmux.mipsel`) and Pi
+(`build/serialmux.aarch64`) are included in the repo and are updated with each
+release. If you want to build from source:
+
+```bash
+make toolchain   # one-time: downloads musl.cc cross-compilers into .toolchain/
+make mipsel      # K1 binary  → build/serialmux.mipsel
+make aarch64     # Pi binary  → build/serialmux.aarch64
+```
 
 ### Raspberry Pi side
 
 1. #### Install Simple AF for RPi
     Install [Simple AF for RPi](https://pellcorp.github.io/creality-wiki/rpi/).
-    Before running the installer, run this to get the appropriate printer profiles:
-
-    ```bash
-    ~/pellcorp/installer.sh --branch jp_k1_pi_base_printers
-    ```
-
-    > If you have a K1 or K1 Max and are unsure whether it is a 2023 or 2024
-    > variant, run this on the K1. If it returns `1` it is 2024, otherwise 2023:
-    > ```sh
-    > /usr/bin/get_sn_mac.sh structure_version
-    > ```
-
-    Continue installing Simple AF for RPi using the appropriate profile for your printer.
 
 2. #### Enable USB OTG mode
     Run the following script once to configure the Pi to act as a USB gadget. This
@@ -121,33 +120,16 @@ The following files are required. Place them as described in each section below:
     > to `dtoverlay=dwc2,dr_mode=peripheral` in `/boot/firmware/config.txt`. Some
     > Pi configurations require the mode to be set explicitly.
 
-3. #### Install the gadget setup script
-    Copy `setup_pik1.sh` to `/opt/pik1/setup_pik1.sh` and make it executable:
+3. #### Install pik1
+    From the repo directory on the Pi (pre-built binary included):
 
     ```bash
-    sudo mkdir -p /opt/pik1
-    sudo cp setup_pik1.sh /opt/pik1/setup_pik1.sh
-    sudo chmod +x /opt/pik1/setup_pik1.sh
+    make install-pi
     ```
 
-    This script configures a single CDC ACM gadget function via configfs, creating
-    `/dev/ttyGS0`. It is idempotent -- if the gadget is already bound to a UDC it
-    exits immediately, making it safe to run on service restarts.
-
-4. #### Install serialmux
-    ```bash
-    sudo cp serialmux.py /opt/pik1/serialmux.py
-    ```
-
-5. #### Install the systemd service
-    Copy `pik1.service` to `/etc/systemd/system/pik1.service`:
-
-    ```bash
-    sudo cp pik1.service /etc/systemd/system/pik1.service
-    sudo systemctl daemon-reload
-    sudo systemctl enable pik1
-    sudo systemctl start pik1
-    ```
+    This copies the binary and setup script to `/opt/pik1/`, installs and enables
+    `pik1.service`, and runs `systemctl daemon-reload`. Pass `SUDO=` if running as
+    root, or `PI_DIR=/your/path` to override the install prefix.
 
     The service runs `setup_pik1.sh` as root first (needed for configfs access),
     then starts the serialmux host daemon as UID 1000 so the PTY devices it creates
@@ -160,7 +142,7 @@ The following files are required. Place them as described in each section below:
     sudo usermod -aG dialout $(id -un 1000)
     ```
 
-6. #### Configure printer.cfg
+4. #### Configure printer.cfg
     Add or update the MCU serial paths in your `printer.cfg`:
 
     ```ini
@@ -176,56 +158,52 @@ The following files are required. Place them as described in each section below:
     > `restart_method: command` is required. Hardware reset via DTR/RTS does not work over the serialmux tunnel as no hardware control lines are available.
 
 ### K1 side
-#### Note: these commands are generic, as this is just a rough install guideline
 
 1. #### Install Simple AF
-    - If not already done, install [Simple AF](https://pellcorp.github.io/creality-wiki/) on the K1.
+    Install [Simple AF](https://pellcorp.github.io/creality-wiki/) on the K1.
 
-2. #### Disable unnecessary K1 services
-    The K1 is now a bridge-only machine. Several services that made sense when it was running Klipper locally are no longer needed or will actively interfere.
+2. #### Install pik1
+    From the repo directory on the K1 (pre-built binary included):
 
-    - Required -- Klipper and Moonraker must not run on the K1
-        ```sh
-        mv /etc/init.d/S55klipper_service   /etc/init.d/_S55klipper_service
-        mv /etc/init.d/S56moonraker_service /etc/init.d/_S56moonraker_service
-        ```
-    - Recommended -- not needed on a bridge-only K1
-        ```sh
-        mv /etc/init.d/S55klipper_mcu      /etc/init.d/_S55klipper_mcu     # host MCU (software), not required
-        mv /etc/init.d/S50nginx_service    /etc/init.d/_S50nginx_service   # proxied Moonraker, no longer relevant
-        mv /etc/init.d/S50unslung          /etc/init.d/_S50unslung         # unrelated to printing
-        mv /etc/init.d/S50webcam           /etc/init.d/_S50webcam          # camera could be moved to the Pi
-        ```
-    - Optional/Recommended -- Disable grumpyscreen if not using the TCP tunnel (see optional section below)
-        ```sh
-        mv /etc/init.d/S99grumpyscreen /etc/init.d/_S99grumpyscreen
-        ```
-
-3. #### Install serialmux
-    Create a `/usr/data/pik1` if it doesn't already exist and copy or move the python file there:
-    ```sh
-    mkdir -p /usr/data/pik1
-    cp serialmux.py /usr/data/pik1/serialmux.py
+    ```bash
+    make install-k1
     ```
 
-4. #### Install the init script
-    Copy/move `S99pik1` to `/etc/init.d/S99pik1` and make it executable:
+    This copies `build/serialmux.mipsel` to `/usr/data/pik1/serialmux`, installs
+    `S99pik1` to `/etc/init.d/`, and disables the services below by renaming them
+    with a `_` prefix so the init system skips them:
+
+    | Service | Reason |
+    |---|---|
+    | `S55klipper_service` | Must not run — K1 is now bridge-only |
+    | `S56moonraker_service` | Must not run — no local Klipper |
+    | `S55klipper_mcu` | Host MCU software, not needed |
+    | `S50nginx_service` | Proxied Moonraker, no longer relevant |
+    | `S50unslung` | Unrelated to printing |
+    | `S50webcam` | Camera can be moved to the Pi |
+    | `S99guppyscreen` | See optional TCP tunnel section below |
+
+    If transferring via scp rather than running from a repo clone on the K1:
+
     ```sh
-    cp S99pik1 /etc/init.d/S99pik1
-    chmod +x /etc/init.d/S99pik1
+    scp build/serialmux.mipsel root@<k1-ip>:/usr/data/pik1/serialmux
+    scp S99pik1 root@<k1-ip>:/etc/init.d/S99pik1
+    ssh root@<k1-ip> chmod +x /usr/data/pik1/serialmux /etc/init.d/S99pik1
     ```
 
-5. #### Restart the K1
+    Then run the service rename loop manually on the K1.
+
+3. #### Restart the K1
     ```sh
     reboot
     ```
-    Upon start, the tool will begin logging to `/tmp/serialmux-exporter.log`.
+    Upon start, the daemon logs to `/tmp/pik1.log`.
 
 ## Optional: K1 touchscreen (TCP tunnel)
 
-The serialmux TCP tunnel forwards the SimpleAF K1 touchscreen's (grumpyscreen) Moonraker
+The serialmux TCP tunnel forwards the SimpleAF K1 touchscreen's (guppyscreen) Moonraker
 requests to the Pi over the USB link. This is strongly recommended over the
-alternative of pointing grumpyscreen at the Pi's WiFi IP address -- WiFi is
+alternative of pointing guppyscreen at the Pi's WiFi IP address -- WiFi is
 unreliable enough that you will eventually lose display functionality mid-print.
 The tunnel runs over the same wired USB link as the MCU bridge and stays up as
 long as the physical connection does.
@@ -234,7 +212,7 @@ The tunnel is low-bandwidth and intended for Moonraker API traffic only
 (temperatures, print status, controls). Do not route webcam streams or file
 transfers through it.
 
-grumpyscreen requires no configuration changes -- it continues talking to
+guppyscreen requires no configuration changes -- it continues talking to
 `localhost:7125` as normal and the tunnel forwards those connections to the Pi
 transparently.
 
@@ -247,11 +225,16 @@ To enable, add a `tcp` channel spec to both sides.
 DAEMON_ARGS="exporter --usb $USB_ID mcu:0:$MCU_DEV:$MCU_BAUD mcu:1:$NOZZLE_DEV:$NOZZLE_BAUD tcp:2:0.0.0.0:7125"
 ```
 
+Also re-enable guppyscreen if you disabled it:
+```sh
+mv /etc/init.d/_S99guppyscreen /etc/init.d/S99guppyscreen
+```
+
 **Pi systemd service** -- edit `/etc/systemd/system/pik1.service` and add the
 tcp channel to `ExecStart`:
 
 ```ini
-ExecStart=/usr/bin/python3 /opt/pik1/serialmux.py host /dev/ttyGS0 \
+ExecStart=/opt/pik1/serialmux host /dev/ttyGS0 \
     mcu:0:/tmp/klipper_mcu \
     mcu:1:/tmp/klipper_toolhead \
     tcp:2:127.0.0.1:7125
@@ -264,7 +247,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart pik1
 ```
 
-No changes are needed to the K1's grumpyscreen configuration -- it continues
+No changes are needed to guppyscreen's configuration -- it continues
 talking to `127.0.0.1:7125` as if Moonraker were local.
 
 ## Post-install verification
@@ -292,7 +275,7 @@ talking to `127.0.0.1:7125` as if Moonraker were local.
 
 2. #### K1 log
     ```bash
-    cat /tmp/serialmux-exporter.log
+    cat /tmp/pik1.log
     ```
     A normal startup looks like:
     ```
@@ -324,24 +307,26 @@ talking to `127.0.0.1:7125` as if Moonraker were local.
 
 ## Switching back to standalone K1 / Simple AF
 
-1. #### Disable serialmux on K1
+1. #### Uninstall pik1 from K1
+    ```sh
+    make uninstall-k1
+    ```
+    This removes the init script and binary and restores all disabled services.
+    Alternatively:
     ```sh
     mv /etc/init.d/S99pik1 /etc/init.d/_S99pik1
-    ```
-
-2. #### Re-enable K1 services
-    ```sh
-    mv /etc/init.d/_S55klipper_service /etc/init.d/S55klipper_service
+    mv /etc/init.d/_S55klipper_service  /etc/init.d/S55klipper_service
     mv /etc/init.d/_S56moonraker_service /etc/init.d/S56moonraker_service
+    # restore any other services as needed
     ```
 
-3. #### Stop Pi service
+2. #### Stop Pi service
     ```bash
     sudo systemctl stop pik1
     ```
     Optional -- the service will just sit idle if left running.
 
-4. #### Revert printer.cfg and recable
+3. #### Revert printer.cfg and recable
     Revert `printer.cfg` serial paths and reconfigure cables as needed.
 
     You can run both the Pi and K1 standalone simultaneously (e.g. for camera

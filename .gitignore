@@ -1,2 +1,5 @@
 __pycache__/
 serialmux-rs/target/
+.toolchain/
+build/serialmux
+build/serialmux.armv7
