@@ -9,3 +9,6 @@
 /// standard `serialmux` binary.
 #[cfg(feature = "windlass")]
 pub mod windlass;
+
+/// Structured logging initialisation shared by both binaries.
+pub mod logging;

@@ -278,6 +278,7 @@ fn parse_channel_specs(mode: &str, specs: &[String]) -> Vec<McuSpec> {
 
 #[tokio::main]
 async fn main() {
+    serialmux::logging::init("windlass-bridge");
     let args = parse_args();
 
     let link_device = resolve_link_device(

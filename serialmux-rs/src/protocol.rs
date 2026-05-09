@@ -135,9 +135,7 @@ impl FrameParser {
                 // Buffer full with no progress.  This should not happen under
                 // normal backpressure, but guard to avoid an infinite loop.
                 // Log so operators can diagnose backpressure failures.
-                crate::serial::log(
-                    "FrameParser: buffer full, dropping remaining input (backpressure missed)"
-                );
+                tracing::warn!("FrameParser: buffer full, dropping remaining input (backpressure missed)");
                 break;
             }
             self.buf[self.len..self.len + copy].copy_from_slice(&data[pos..pos + copy]);
@@ -281,7 +279,7 @@ impl TxQueue {
         let n = data.len();
         if n == 0 { return; }
         if n > LINK_TXBUF_SIZE - 1 - self.used() {
-            crate::serial::log("TxQueue: overflow — dropping frame (backpressure missed)");
+            tracing::warn!("TxQueue: overflow — dropping frame (backpressure missed)");
             return;
         }
         let space_to_end = LINK_TXBUF_SIZE - self.tail;

@@ -9,29 +9,6 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Logging
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Write a `"HH:MM:SS message"` line to stderr.
-///
-/// Uses wall-clock time (UTC seconds) to match the Python `_log()` format.
-pub fn log(msg: &str) {
-    eprintln!("{} {}", timestamp(), msg);
-}
-
-/// Return the current wall-clock time formatted as `"HH:MM:SS"`.
-pub fn timestamp() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // File-descriptor helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -267,12 +244,7 @@ pub fn wait_for_acm(vid: &str, pid: &str) -> String {
         }
         let now = Instant::now();
         if now.duration_since(last_log) >= Duration::from_secs(10) {
-            eprintln!(
-                "{} USB {}:{} -- waiting for device to appear...",
-                timestamp(),
-                vid,
-                pid
-            );
+            tracing::info!(vid, pid, "USB device not yet present, waiting…");
             last_log = now;
         }
         std::thread::sleep(Duration::from_millis(500));

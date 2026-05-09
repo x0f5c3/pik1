@@ -39,7 +39,7 @@ pub async fn run_exporter(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("windlass-bridge exporter: opening USB link {}", link_device);
+    tracing::info!(device = %link_device, "windlass-bridge exporter: opening USB link");
 
     // Open the USB CDC device.  Baud = 0 means "skip cfsetspeed" — CDC ACM
     // ignores baud, so we just need the raw non-blocking fd.
@@ -56,18 +56,12 @@ pub async fn run_exporter(
     // Spawn a write task and a read task for each UART channel.
     for ch in channels {
         let ch_id = ch.ch_id;
-        eprintln!(
-            "windlass-bridge exporter: ch{} opening UART {} @ {} baud",
-            ch_id, ch.path, ch.baud
-        );
+        tracing::info!(ch_id, path = %ch.path, baud = ch.baud, "windlass-bridge exporter: opening UART");
 
         let uart = match open_serial(&ch.path, ch.baud) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "windlass-bridge exporter: ch{} cannot open {}: {}",
-                    ch_id, ch.path, e
-                );
+                tracing::error!(ch_id, path = %ch.path, err = %e, "windlass-bridge exporter: cannot open UART");
                 return Err(e.into());
             }
         };
@@ -94,14 +88,11 @@ pub async fn run_exporter(
                         }
                     }
                     Some(Err(e)) => {
-                        eprintln!(
-                            "windlass-bridge exporter: ch{} UART read error: {}",
-                            ch_id, e
-                        );
+                        tracing::error!(ch_id, err = %e, "windlass-bridge exporter: UART read error");
                         break;
                     }
                     None => {
-                        eprintln!("windlass-bridge exporter: ch{} UART stream ended", ch_id);
+                        tracing::warn!(ch_id, "windlass-bridge exporter: UART stream ended");
                         break;
                     }
                 }
@@ -114,10 +105,7 @@ pub async fn run_exporter(
         tokio::spawn(async move {
             while let Some(frame) = uart_write_rx.recv().await {
                 if let Err(e) = uart_write.write_all(&frame).await {
-                    eprintln!(
-                        "windlass-bridge exporter: ch{} UART write error: {}",
-                        ch_id, e
-                    );
+                    tracing::error!(ch_id, err = %e, "windlass-bridge exporter: UART write error");
                     break;
                 }
             }
@@ -131,7 +119,7 @@ pub async fn run_exporter(
         let mut framed_w = FramedWrite::new(usb_write, TunnelCodec);
         while let Some(tf) = usb_rx.recv().await {
             if let Err(e) = framed_w.send(tf).await {
-                eprintln!("windlass-bridge exporter: USB write error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge exporter: USB write error");
                 break;
             }
         }
@@ -147,18 +135,15 @@ pub async fn run_exporter(
                 if let Some(tx) = uart_write_txs.get(&tf.ch_id) {
                     let _ = tx.send(tf.frame);
                 } else {
-                    eprintln!(
-                        "windlass-bridge exporter: received frame for unknown ch{}",
-                        tf.ch_id
-                    );
+                    tracing::warn!(ch_id = tf.ch_id, "windlass-bridge exporter: received frame for unknown channel");
                 }
             }
             Some(Err(e)) => {
-                eprintln!("windlass-bridge exporter: USB read error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge exporter: USB read error");
                 break;
             }
             None => {
-                eprintln!("windlass-bridge exporter: USB link closed");
+                tracing::info!("windlass-bridge exporter: USB link closed");
                 break;
             }
         }

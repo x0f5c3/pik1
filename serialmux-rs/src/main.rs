@@ -14,12 +14,13 @@
 
 mod channel;
 mod daemon;
+mod logging;
 mod protocol;
 mod serial;
 
 use channel::{McuChannel, PtyChannel, TcpDestChannel, TcpSourceChannel};
 use daemon::Daemon;
-use serial::{log, wait_for_acm};
+use serial::wait_for_acm;
 
 const DESCRIPTION: &str = r#"serialmux -- Klipper serial + TCP multiplexer over a USB CDC gadget link.
 Single-threaded, event-driven. Drop-in replacement for serialmux.py.
@@ -280,13 +281,14 @@ fn build_channels(
 // ---------------------------------------------------------------------------
 
 fn main() {
+    logging::init("serialmux");
     let args = parse_args();
 
     // If USB discovery is requested, block until the device appears once.
     if let Some((vid, pid)) = &args.usb_id {
         if crate::serial::find_acm_by_usb_id(vid, pid).is_none() {
             wait_for_acm(vid, pid);
-            log(&format!("USB {}:{} found, starting daemon", vid, pid));
+            tracing::info!(vid, pid, "USB device found, starting daemon");
         }
     }
 

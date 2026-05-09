@@ -58,7 +58,7 @@ pub async fn run_host(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!("windlass-bridge host: opening USB link {}", link_device);
+    tracing::info!(device = %link_device, "windlass-bridge host: opening USB link");
 
     // Open the USB CDC gadget device.  Baud = 0 → skip cfsetspeed.
     let usb = open_serial(&link_device, 0)?;
@@ -81,10 +81,7 @@ pub async fn run_host(
         // Remove any stale socket from a previous run.
         prepare_socket_path(&socket_path)?;
 
-        eprintln!(
-            "windlass-bridge host: ch{} binding Unix socket {}",
-            ch_id, socket_path
-        );
+        tracing::info!(ch_id, socket = %socket_path, "windlass-bridge host: binding Unix socket");
 
         let listener = UnixListener::bind(&socket_path)?;
         let usb_tx_clone = usb_tx.clone();
@@ -99,10 +96,7 @@ pub async fn run_host(
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
-                        eprintln!(
-                            "windlass-bridge host: ch{} Klipper connected on {}",
-                            ch_id, socket_path
-                        );
+                        tracing::info!(ch_id, socket = %socket_path, "windlass-bridge host: Klipper connected");
                         handle_klipper_connection(
                             ch_id,
                             stream,
@@ -110,13 +104,10 @@ pub async fn run_host(
                             Arc::clone(&klipper_tx_slot),
                         )
                         .await;
-                        eprintln!(
-                            "windlass-bridge host: ch{} Klipper disconnected from {}",
-                            ch_id, socket_path
-                        );
+                        tracing::info!(ch_id, socket = %socket_path, "windlass-bridge host: Klipper disconnected");
                     }
                     Err(e) => {
-                        eprintln!("windlass-bridge host: ch{} accept error: {}", ch_id, e);
+                        tracing::error!(ch_id, err = %e, "windlass-bridge host: accept error");
                         // Brief pause before retrying.
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
@@ -130,7 +121,7 @@ pub async fn run_host(
         let mut framed_w = FramedWrite::new(usb_write, TunnelCodec);
         while let Some(tf) = usb_rx.recv().await {
             if let Err(e) = framed_w.send(tf).await {
-                eprintln!("windlass-bridge host: USB write error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge host: USB write error");
                 break;
             }
         }
@@ -154,18 +145,15 @@ pub async fn run_host(
                     // If no Klipper client is connected, the frame is silently
                     // dropped — the MCU will retransmit if it needs an ACK.
                 } else {
-                    eprintln!(
-                        "windlass-bridge host: received frame for unknown ch{}",
-                        ch_id
-                    );
+                    tracing::warn!(ch_id, "windlass-bridge host: received frame for unknown channel");
                 }
             }
             Some(Err(e)) => {
-                eprintln!("windlass-bridge host: USB read error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge host: USB read error");
                 break;
             }
             None => {
-                eprintln!("windlass-bridge host: USB link closed");
+                tracing::info!("windlass-bridge host: USB link closed");
                 break;
             }
         }
@@ -215,7 +203,7 @@ async fn handle_klipper_connection(
                     }
                 }
                 Err(e) => {
-                    eprintln!("windlass-bridge host: ch{} socket read error: {}", ch_id, e);
+                    tracing::error!(ch_id, err = %e, "windlass-bridge host: socket read error");
                     break;
                 }
             }
@@ -226,10 +214,7 @@ async fn handle_klipper_connection(
     let usb_to_sock = tokio::spawn(async move {
         while let Some(frame) = klipper_rx.recv().await {
             if let Err(e) = sock_write.write_all(&frame).await {
-                eprintln!(
-                    "windlass-bridge host: ch{} socket write error: {}",
-                    ch_id, e
-                );
+                tracing::error!(ch_id, err = %e, "windlass-bridge host: socket write error");
                 break;
             }
         }

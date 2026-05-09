@@ -120,10 +120,7 @@ pub fn wait_for_acm(vid: &str, pid: &str) -> String {
         }
         let now = Instant::now();
         if now.duration_since(last_log) >= Duration::from_secs(10) {
-            eprintln!(
-                "windlass-bridge: USB {}:{} — waiting for device to appear…",
-                vid, pid
-            );
+            tracing::info!(vid, pid, "windlass-bridge: USB device not yet present, waiting");
             last_log = now;
         }
         std::thread::sleep(Duration::from_millis(500));

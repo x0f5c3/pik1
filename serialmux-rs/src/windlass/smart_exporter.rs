@@ -53,10 +53,7 @@ pub async fn run_smart_exporter(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "windlass-bridge smart exporter: opening USB link {}",
-        link_device
-    );
+    tracing::info!(device = %link_device, "windlass-bridge smart exporter: opening USB link");
 
     // Open the USB CDC device (baud=0 → skip cfsetspeed).
     let usb = open_serial(&link_device, 0)?;
@@ -72,43 +69,27 @@ pub async fn run_smart_exporter(
 
     for ch in channels {
         let ch_id = ch.ch_id;
-        eprintln!(
-            "windlass-bridge smart exporter: ch{} opening UART {} @ {} baud",
-            ch_id, ch.path, ch.baud
-        );
+        tracing::info!(ch_id, path = %ch.path, baud = ch.baud, "windlass-bridge smart exporter: opening UART");
 
         let uart = match open_serial(&ch.path, ch.baud) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "windlass-bridge smart exporter: ch{} cannot open {}: {}",
-                    ch_id, ch.path, e
-                );
+                tracing::error!(ch_id, path = %ch.path, err = %e, "windlass-bridge smart exporter: cannot open UART");
                 return Err(e.into());
             }
         };
 
         // Fetch the MCU dictionary with the high-level McuConnection API.
-        eprintln!(
-            "windlass-bridge smart exporter: ch{} fetching MCU dictionary…",
-            ch_id
-        );
+        tracing::info!(ch_id, "windlass-bridge smart exporter: fetching MCU dictionary");
         let dictionary = match McuConnection::connect(uart).await {
             Ok(conn) => {
                 let dict = conn.raw_dictionary_bytes().to_vec();
                 conn.close().await;
-                eprintln!(
-                    "windlass-bridge smart exporter: ch{} dictionary {} bytes",
-                    ch_id,
-                    dict.len()
-                );
+                tracing::info!(ch_id, bytes = dict.len(), "windlass-bridge smart exporter: dictionary fetched");
                 dict
             }
             Err(e) => {
-                eprintln!(
-                    "windlass-bridge smart exporter: ch{} dictionary fetch failed: {}",
-                    ch_id, e
-                );
+                tracing::error!(ch_id, err = %e, "windlass-bridge smart exporter: dictionary fetch failed");
                 return Err(e.into());
             }
         };
@@ -117,10 +98,7 @@ pub async fn run_smart_exporter(
         let uart = match open_serial(&ch.path, ch.baud) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!(
-                    "windlass-bridge smart exporter: ch{} cannot reopen {}: {}",
-                    ch_id, ch.path, e
-                );
+                tracing::error!(ch_id, path = %ch.path, err = %e, "windlass-bridge smart exporter: cannot reopen UART");
                 return Err(e.into());
             }
         };
@@ -150,17 +128,11 @@ pub async fn run_smart_exporter(
                         }
                     }
                     Some(Err(e)) => {
-                        eprintln!(
-                            "windlass-bridge smart exporter: ch{} MCU transport error: {}",
-                            ch_id, e
-                        );
+                        tracing::error!(ch_id, err = %e, "windlass-bridge smart exporter: MCU transport error");
                         break;
                     }
                     None => {
-                        eprintln!(
-                            "windlass-bridge smart exporter: ch{} MCU transport closed",
-                            ch_id
-                        );
+                        tracing::warn!(ch_id, "windlass-bridge smart exporter: MCU transport closed");
                         break;
                     }
                 }
@@ -172,10 +144,7 @@ pub async fn run_smart_exporter(
         tokio::spawn(async move {
             while let Some(payload) = uart_cmd_rx.recv().await {
                 if let Err(e) = transport.send(&payload) {
-                    eprintln!(
-                        "windlass-bridge smart exporter: ch{} MCU send error: {}",
-                        ch_id, e
-                    );
+                    tracing::error!(ch_id, err = %e, "windlass-bridge smart exporter: MCU send error");
                     break;
                 }
             }
@@ -187,7 +156,7 @@ pub async fn run_smart_exporter(
         let mut framed_w = FramedWrite::new(usb_write, PayloadTunnelCodec);
         while let Some(pf) = usb_rx.recv().await {
             if let Err(e) = framed_w.send(pf).await {
-                eprintln!("windlass-bridge smart exporter: USB write error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge smart exporter: USB write error");
                 break;
             }
         }
@@ -210,18 +179,15 @@ pub async fn run_smart_exporter(
                 if let Some(tx) = uart_cmd_txs.get(&pf.ch_id) {
                     let _ = tx.send(pf.payload.to_vec());
                 } else {
-                    eprintln!(
-                        "windlass-bridge smart exporter: received frame for unknown ch{}",
-                        pf.ch_id
-                    );
+                    tracing::warn!(ch_id = pf.ch_id, "windlass-bridge smart exporter: received frame for unknown channel");
                 }
             }
             Some(Err(e)) => {
-                eprintln!("windlass-bridge smart exporter: USB read error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge smart exporter: USB read error");
                 break;
             }
             None => {
-                eprintln!("windlass-bridge smart exporter: USB link closed");
+                tracing::info!("windlass-bridge smart exporter: USB link closed");
                 break;
             }
         }

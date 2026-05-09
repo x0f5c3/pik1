@@ -30,6 +30,11 @@ windlass = [
     "dep:futures",
 ]
 
+# Route logs directly into the systemd journal (sd_journal_sendv).
+# Requires libsystemd at link time; not needed when running under a
+# journal-connected stdio pipe.
+journald = ["dep:tracing-journald"]
+
 [dependencies]
 mio       = { version = "1.2",  features = ["os-poll", "net", "os-ext"] }
 crc32fast = "1.5"
@@ -39,6 +44,13 @@ nix       = { version = "0.31", features = [
     "ioctl",  # kept for potential platform-specific ioctl use (e.g. TIOCGPTN)
 ] }
 libc      = "0.2"
+
+# --- logging -----------------------------------------------------------------
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+# Optional: write structured logs directly to the systemd journal.
+tracing-journald   = { version = "0.3", optional = true }
 
 # --- windlass feature dependencies (optional) --------------------------------
 # windlass: host-side Klipper transport, used by smart-proxy exporter helpers.

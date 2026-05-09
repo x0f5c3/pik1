@@ -23,7 +23,7 @@ use crate::protocol::{
     build_frame, FrameParser, TxQueue, F_ACK, F_DATA, F_HELLO, F_PING, F_PONG, F_TDATA,
     LINK_HIGH_WATER, LINK_LOW_WATER,
 };
-use crate::serial::{close_raw, find_acm_by_usb_id, log, open_serial_fd, read_nonblock};
+use crate::serial::{close_raw, find_acm_by_usb_id, open_serial_fd, read_nonblock};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tuning constants
@@ -115,7 +115,7 @@ impl Daemon {
         let dev = match self.resolve_dev() {
             Some(d) => d,
             None => {
-                log("Link: no device available");
+                tracing::warn!("Link: no device available");
                 self.schedule_reopen();
                 return;
             }
@@ -127,7 +127,7 @@ impl Daemon {
                     TOKEN_LINK,
                     Interest::READABLE,
                 ) {
-                    log(&format!("Link: register error: {}", e));
+                    tracing::warn!(err = %e, "Link: register error");
                     // SAFETY: `fd` was just opened and we are discarding it.
                     close_raw(fd);
                     self.schedule_reopen();
@@ -141,13 +141,13 @@ impl Daemon {
                 self.txq.reset();
                 self.last_rx = Some(Instant::now());
                 self.last_tx = Some(Instant::now());
-                log(&format!("Link: opened {}", dev));
+                tracing::info!(device = %dev, "Link: opened");
                 // Initiate handshake.
                 self.txq.enqueue(&build_frame(F_HELLO, 0, b""));
                 self.set_link_write_interest(poll, true);
             }
             Err(e) => {
-                log(&format!("Link: cannot open {}: {}", dev, e));
+                tracing::warn!(device = %dev, err = %e, "Link: cannot open");
                 self.schedule_reopen();
             }
         }
@@ -155,7 +155,7 @@ impl Daemon {
 
     fn close_link(&mut self, reason: &str, poll: &Poll) {
         if self.disconnected { return; }
-        log(&format!("Link: down -- {}", reason));
+        tracing::warn!(%reason, "Link: down");
         self.disconnected = true;
         self.link_up      = false;
         if let Some(fd) = self.link_fd.take() {
@@ -276,7 +276,7 @@ impl Daemon {
             F_HELLO => {
                 self.enqueue_frame(build_frame(F_ACK, 0, b""), poll);
                 if self.link_up {
-                    log("Link: peer reconnected, rebroadcasting channel states");
+                    tracing::info!("Link: peer reconnected, rebroadcasting channel states");
                     let ch_ids: Vec<u8> = self.channels.keys().copied().collect();
                     for id in ch_ids {
                         let ch  = &mut self.channels;
@@ -288,12 +288,12 @@ impl Daemon {
                     self.set_link_write_interest(poll, !self.txq.is_empty());
                     return;
                 }
-                log("Link: received HELLO from peer");
+                tracing::info!("Link: received HELLO from peer");
                 self.on_link_up(poll);
                 return;
             }
             F_ACK => {
-                log("Link: received ACK from peer");
+                tracing::info!("Link: received ACK from peer");
                 self.on_link_up(poll);
                 return;
             }
@@ -319,7 +319,7 @@ impl Daemon {
     fn on_link_up(&mut self, poll: &Poll) {
         if self.link_up { return; }
         self.link_up = true;
-        log(&format!("Link: handshake complete ({})", self.mode));
+        tracing::info!(mode = %self.mode, "Link: handshake complete");
         let ch_ids: Vec<u8> = self.channels.keys().copied().collect();
         for id in ch_ids {
             let ch  = &mut self.channels;
@@ -371,7 +371,7 @@ impl Daemon {
 
     /// Run the event loop until killed.
     pub fn run(&mut self, poll: &mut Poll) {
-        log(&format!("serialmux {} started", self.mode));
+        tracing::info!(mode = %self.mode, "serialmux started");
         let mut events = Events::with_capacity(128);
         if self.disconnected { self.open_link(poll); }
 
@@ -400,7 +400,7 @@ impl Daemon {
             let timeout = self.next_timeout(Instant::now());
             if let Err(e) = poll.poll(&mut events, Some(timeout)) {
                 if e.kind() != std::io::ErrorKind::Interrupted {
-                    log(&format!("poll error: {}", e));
+                    tracing::warn!(err = %e, "poll error");
                 }
                 continue;
             }

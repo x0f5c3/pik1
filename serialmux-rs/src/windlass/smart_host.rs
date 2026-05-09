@@ -179,10 +179,7 @@ pub async fn run_smart_host(
     link_device: String,
     channels: Vec<McuSpec>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprintln!(
-        "windlass-bridge smart host: opening USB link {}",
-        link_device
-    );
+    tracing::info!(device = %link_device, "windlass-bridge smart host: opening USB link");
 
     let usb = open_serial(&link_device, 0)?;
     let (usb_read, usb_write) = tokio::io::split(usb);
@@ -206,10 +203,7 @@ pub async fn run_smart_host(
     for ch in &channels {
         let ch_id = ch.ch_id;
         prepare_socket_path(&ch.path)?;
-        eprintln!(
-            "windlass-bridge smart host: ch{} binding Unix socket {}",
-            ch_id, ch.path
-        );
+        tracing::info!(ch_id, socket = %ch.path, "windlass-bridge smart host: binding Unix socket");
         mcu_payload_slots.insert(ch_id, Arc::new(tokio::sync::Mutex::new(None)));
     }
 
@@ -230,10 +224,7 @@ pub async fn run_smart_host(
             Err(e) => {
                 // socket was already bound in the first loop via
                 // prepare_socket_path; if that raced, just skip.
-                eprintln!(
-                    "windlass-bridge smart host: ch{} bind error ({}): {}",
-                    ch_id, socket_path, e
-                );
+                tracing::error!(ch_id, socket = %socket_path, err = %e, "windlass-bridge smart host: bind error");
                 continue;
             }
         };
@@ -255,16 +246,12 @@ pub async fn run_smart_host(
                 }
             };
 
-            eprintln!(
-                "windlass-bridge smart host: ch{} ready (dictionary {} bytes)",
-                ch_id,
-                dictionary.len()
-            );
+            tracing::info!(ch_id, bytes = dictionary.len(), "windlass-bridge smart host: channel ready");
 
             loop {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
-                        eprintln!("windlass-bridge smart host: ch{} Klipper connected", ch_id);
+                        tracing::info!(ch_id, "windlass-bridge smart host: Klipper connected");
                         handle_klipper_smart_connection(
                             ch_id,
                             stream,
@@ -273,16 +260,10 @@ pub async fn run_smart_host(
                             Arc::clone(&dictionary),
                         )
                         .await;
-                        eprintln!(
-                            "windlass-bridge smart host: ch{} Klipper disconnected",
-                            ch_id
-                        );
+                        tracing::info!(ch_id, "windlass-bridge smart host: Klipper disconnected");
                     }
                     Err(e) => {
-                        eprintln!(
-                            "windlass-bridge smart host: ch{} accept error: {}",
-                            ch_id, e
-                        );
+                        tracing::error!(ch_id, err = %e, "windlass-bridge smart host: accept error");
                         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                     }
                 }
@@ -295,7 +276,7 @@ pub async fn run_smart_host(
         let mut framed_w = FramedWrite::new(usb_write, PayloadTunnelCodec);
         while let Some(pf) = usb_out_rx.recv().await {
             if let Err(e) = framed_w.send(pf).await {
-                eprintln!("windlass-bridge smart host: USB write error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge smart host: USB write error");
                 break;
             }
         }
@@ -320,18 +301,15 @@ pub async fn run_smart_host(
                     // If no active Klipper connection, the frame is dropped —
                     // Klipper will reconnect and re-request the missing state.
                 } else {
-                    eprintln!(
-                        "windlass-bridge smart host: received frame for unknown ch{}",
-                        pf.ch_id
-                    );
+                    tracing::warn!(ch_id = pf.ch_id, "windlass-bridge smart host: received frame for unknown channel");
                 }
             }
             Some(Err(e)) => {
-                eprintln!("windlass-bridge smart host: USB read error: {}", e);
+                tracing::error!(err = %e, "windlass-bridge smart host: USB read error");
                 break;
             }
             None => {
-                eprintln!("windlass-bridge smart host: USB link closed");
+                tracing::info!("windlass-bridge smart host: USB link closed");
                 break;
             }
         }
@@ -357,17 +335,11 @@ async fn gather_dictionary(mut ctrl_rx: mpsc::UnboundedReceiver<Vec<u8>>) -> Vec
                 dict.extend_from_slice(&payload[1..]);
             }
             CTRL_DICT_DONE => {
-                eprintln!(
-                    "windlass-bridge smart host: dictionary ready ({} bytes)",
-                    dict.len()
-                );
+                tracing::info!(bytes = dict.len(), "windlass-bridge smart host: dictionary ready");
                 return dict;
             }
             other => {
-                eprintln!(
-                    "windlass-bridge smart host: unknown control type 0x{:02X}, ignoring",
-                    other
-                );
+                tracing::warn!(ctrl_type = other, "windlass-bridge smart host: unknown control type, ignoring");
             }
         }
     }

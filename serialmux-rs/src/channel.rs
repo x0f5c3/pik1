@@ -21,7 +21,7 @@ use crate::protocol::{
     KLIPPER_SYNC, MAX_PAYLOAD,
 };
 use crate::serial::{
-    close_raw, log, open_pty_raw, open_serial_fd, pty_slave_name, read_nonblock,
+    close_raw, open_pty_raw, open_serial_fd, pty_slave_name, read_nonblock,
     write_nonblock,
 };
 
@@ -122,13 +122,13 @@ pub trait Channel {
 
 fn reg_add(reg: &Registry, fd: RawFd, token: Token, interest: Interest) {
     if let Err(e) = reg.register(&mut SourceFd(&fd), token, interest) {
-        log(&format!("mio register fd={} token={:?}: {}", fd, token, e));
+        tracing::warn!(fd, ?token, err = %e, "mio register failed");
     }
 }
 
 fn reg_mod(reg: &Registry, fd: RawFd, token: Token, interest: Interest) {
     if let Err(e) = reg.reregister(&mut SourceFd(&fd), token, interest) {
-        log(&format!("mio reregister fd={} token={:?}: {}", fd, token, e));
+        tracing::warn!(fd, ?token, err = %e, "mio reregister failed");
     }
 }
 
@@ -202,17 +202,17 @@ impl McuChannel {
             Ok(fd) => {
                 self.fd        = Some(fd);
                 self.fd_in_sel = false;
-                log(&format!(
-                    "MCU ch{}: opened {} @ {}",
-                    self.ch_id, self.device, self.baud
-                ));
+                tracing::info!(
+                    ch_id = self.ch_id, device = %self.device, baud = self.baud,
+                    "MCU UART opened",
+                );
                 self.update_interest(reg);
             }
             Err(e) => {
-                log(&format!(
-                    "MCU ch{}: cannot open {}: {} -- retry in 2s",
-                    self.ch_id, self.device, e
-                ));
+                tracing::warn!(
+                    ch_id = self.ch_id, device = %self.device, err = %e,
+                    "MCU UART open failed, retrying in 2s",
+                );
                 self.reopen_at = Some(Instant::now() + REOPEN_DELAY);
             }
         }
@@ -263,10 +263,10 @@ impl McuChannel {
                     McuState::Init | McuState::Resetting => {
                         // Wait for Klipper sync byte 0x7E before forwarding.
                         if let Some(idx) = data.iter().position(|&b| b == KLIPPER_SYNC) {
-                            log(&format!(
-                                "MCU ch{}: 0x7E seen at offset {} -> ACTIVE",
-                                self.ch_id, idx
-                            ));
+                            tracing::info!(
+                                ch_id = self.ch_id, sync_offset = idx,
+                                "MCU UART: 0x7E seen, transitioning to ACTIVE",
+                            );
                             self.transition(McuState::Active, txq);
                             if self.link_up {
                                 txq.enqueue(&build_frame(
@@ -286,7 +286,7 @@ impl McuChannel {
                 }
             }
             Err(e) => {
-                log(&format!("MCU ch{}: UART read error: {}", self.ch_id, e));
+                tracing::error!(ch_id = self.ch_id, err = %e, "MCU UART read error");
                 self.close_uart(reg);
                 self.transition(McuState::Resetting, txq);
                 self.reopen_at = Some(Instant::now() + Duration::from_secs(1));
@@ -308,7 +308,7 @@ impl McuChannel {
                 self.txbuf.drain(..n);
             }
             Err(e) => {
-                log(&format!("MCU ch{}: UART write error: {}", self.ch_id, e));
+                tracing::error!(ch_id = self.ch_id, err = %e, "MCU UART write error");
                 self.txbuf.clear();
             }
         }
@@ -319,10 +319,10 @@ impl McuChannel {
         if new_state == self.state {
             return;
         }
-        log(&format!(
-            "MCU ch{}: {:?} -> {:?}",
-            self.ch_id, self.state, new_state
-        ));
+        tracing::info!(
+            ch_id = self.ch_id, from = ?self.state, to = ?new_state,
+            "MCU state transition",
+        );
         self.state = new_state;
         match new_state {
             McuState::Resetting => {
@@ -476,13 +476,13 @@ impl PtyChannel {
                 Ok(slave_path) => {
                     self.remove_symlink();
                     if let Err(e) = std::os::unix::fs::symlink(&slave_path, &self.symlink) {
-                        log(&format!(
-                            "PTY ch{}: symlink {} -> {} failed: {}",
-                            self.ch_id,
-                            slave_path.display(),
-                            self.symlink,
-                            e
-                        ));
+                        tracing::warn!(
+                            ch_id = self.ch_id,
+                            slave = %slave_path.display(),
+                            symlink = %self.symlink,
+                            err = %e,
+                            "PTY symlink failed",
+                        );
                         close_raw(master);
                         close_raw(slave);
                         return;
@@ -491,21 +491,21 @@ impl PtyChannel {
                     self.slave_fd      = Some(slave);
                     self.master_in_sel = false;
                     self.update_interest(reg);
-                    log(&format!(
-                        "PTY ch{}: opened {} -> {}",
-                        self.ch_id,
-                        slave_path.display(),
-                        self.symlink
-                    ));
+                    tracing::info!(
+                        ch_id = self.ch_id,
+                        slave = %slave_path.display(),
+                        symlink = %self.symlink,
+                        "PTY opened",
+                    );
                 }
                 Err(e) => {
-                    log(&format!("PTY ch{}: ttyname failed: {}", self.ch_id, e));
+                    tracing::warn!(ch_id = self.ch_id, err = %e, "PTY ttyname failed");
                     close_raw(master);
                     close_raw(slave);
                 }
             },
             Err(e) => {
-                log(&format!("PTY ch{}: openpty failed: {}", self.ch_id, e));
+                tracing::warn!(ch_id = self.ch_id, err = %e, "PTY openpty failed");
             }
         }
     }
@@ -523,7 +523,7 @@ impl PtyChannel {
         self.master_in_sel = false;
         self.txbuf.clear();
         self.remove_symlink();
-        log(&format!("PTY ch{}: closed", self.ch_id));
+        tracing::info!(ch_id = self.ch_id, "PTY closed");
     }
 
     fn remove_symlink(&self) {
@@ -561,7 +561,7 @@ impl PtyChannel {
             Ok(0) => {}
             Ok(n) => { self.txbuf.drain(..n); }
             Err(e) => {
-                log(&format!("PTY ch{}: write error: {}", self.ch_id, e));
+                tracing::error!(ch_id = self.ch_id, err = %e, "PTY write error");
                 self.txbuf.clear();
             }
         }
@@ -575,11 +575,11 @@ impl Channel for PtyChannel {
     fn on_frame(&mut self, ftype: u8, payload: &[u8], _txq: &mut TxQueue, reg: &Registry) {
         match ftype {
             F_FLUSH => {
-                log(&format!("PTY ch{}: FLUSH -> WAITING", self.ch_id));
+                tracing::info!(ch_id = self.ch_id, "PTY FLUSH -> WAITING");
                 self.close_pty(reg);
             }
             F_READY => {
-                log(&format!("PTY ch{}: READY -> ACTIVE", self.ch_id));
+                tracing::info!(ch_id = self.ch_id, "PTY READY -> ACTIVE");
                 self.open_pty(reg);
             }
             F_DATA => {
@@ -598,7 +598,7 @@ impl Channel for PtyChannel {
     }
 
     fn on_link_disconnect(&mut self, reg: &Registry) {
-        log(&format!("PTY ch{}: link down", self.ch_id));
+        tracing::info!(ch_id = self.ch_id, "PTY link down");
         self.close_pty(reg);
     }
 
@@ -718,7 +718,7 @@ impl TcpSourceChannel {
                                               format!("bad addr: {}", e)))?;
         let mut listener = mio::net::TcpListener::bind(addr)?;
         reg.register(&mut listener, primary_token(ch_id), Interest::READABLE)?;
-        log(&format!("TCP src ch{}: listening {}:{}", ch_id, bind_addr, bind_port));
+        tracing::info!(ch_id, bind_addr, bind_port, "TCP source listening");
         Ok(TcpSourceChannel {
             ch_id,
             listener,
@@ -753,10 +753,7 @@ impl TcpSourceChannel {
                     let slot = match self.alloc_slot() {
                         Some(s) => s,
                         None => {
-                            log(&format!(
-                                "TCP src ch{}: slot pool exhausted",
-                                self.ch_id
-                            ));
+                            tracing::warn!(ch_id = self.ch_id, "TCP src: slot pool exhausted");
                             drop(stream);
                             continue;
                         }
@@ -767,17 +764,11 @@ impl TcpSourceChannel {
                         token,
                         Interest::READABLE | Interest::WRITABLE,
                     ) {
-                        log(&format!(
-                            "TCP src ch{}: register error: {}",
-                            self.ch_id, e
-                        ));
+                        tracing::warn!(ch_id = self.ch_id, err = %e, "TCP src: register error");
                         drop(stream);
                         continue;
                     }
-                    log(&format!(
-                        "TCP src ch{}: accepted {} slot={}",
-                        self.ch_id, addr, slot
-                    ));
+                    tracing::info!(ch_id = self.ch_id, %addr, slot, "TCP src: accepted");
                     self.conns[slot] = Some(TcpConn {
                         stream,
                         txbuf:         Vec::new(),
@@ -793,7 +784,7 @@ impl TcpSourceChannel {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
-                    log(&format!("TCP src ch{}: accept error: {}", self.ch_id, e));
+                    tracing::warn!(ch_id = self.ch_id, err = %e, "TCP src: accept error");
                     break;
                 }
             }
@@ -903,7 +894,7 @@ impl TcpSourceChannel {
                     &pack_cid(slot as u16),
                 ));
             }
-            log(&format!("TCP src ch{}: closed slot={}", self.ch_id, slot));
+            tracing::debug!(ch_id = self.ch_id, slot, "TCP src: slot closed");
         }
     }
 
@@ -945,10 +936,10 @@ impl Channel for TcpSourceChannel {
                 };
                 match action {
                     TDataAction::Close => {
-                        log(&format!(
-                            "TCP src ch{}: slot={} high-water -- closing",
-                            self.ch_id, slot
-                        ));
+                        tracing::warn!(
+                            ch_id = self.ch_id, slot,
+                            "TCP src: slot exceeded high-water, closing",
+                        );
                         self.close_slot(slot, true, txq, reg);
                     }
                     TDataAction::Update => self.update_conn_interest(slot, reg),
@@ -1098,10 +1089,7 @@ impl TcpDestChannel {
         let mut stream = match mio::net::TcpStream::connect(addr) {
             Ok(s) => s,
             Err(e) => {
-                log(&format!(
-                    "TCP dst ch{}: connect slot={} failed: {}",
-                    self.ch_id, slot, e
-                ));
+                tracing::warn!(ch_id = self.ch_id, slot, err = %e, "TCP dst: connect failed");
                 txq.enqueue(&build_frame(
                     F_TCLOSE,
                     self.ch_id,
@@ -1114,10 +1102,7 @@ impl TcpDestChannel {
         let token = tcp_slot_token(self.ch_id, slot);
         if let Err(e) = reg.register(&mut stream, token,
                                      Interest::READABLE | Interest::WRITABLE) {
-            log(&format!(
-                "TCP dst ch{}: register error slot={}: {}",
-                self.ch_id, slot, e
-            ));
+            tracing::warn!(ch_id = self.ch_id, slot, err = %e, "TCP dst: register error");
             txq.enqueue(&build_frame(
                 F_TCLOSE,
                 self.ch_id,
@@ -1125,10 +1110,10 @@ impl TcpDestChannel {
             ));
             return;
         }
-        log(&format!(
-            "TCP dst ch{}: connecting slot={} -> {}:{}",
-            self.ch_id, slot, self.dest_addr, self.dest_port
-        ));
+        tracing::info!(
+            ch_id = self.ch_id, slot, dest_addr = %self.dest_addr, dest_port = self.dest_port,
+            "TCP dst: connecting",
+        );
         self.conns[slot] = Some(TcpConn {
             stream,
             txbuf:         Vec::new(),
@@ -1158,17 +1143,11 @@ impl TcpDestChannel {
                 match conn.stream.peer_addr() {
                     Ok(_) => {
                         conn.connecting = false;
-                        log(&format!(
-                            "TCP dst ch{}: connected slot={}",
-                            self.ch_id, slot
-                        ));
+                        tracing::info!(ch_id = self.ch_id, slot, "TCP dst: connected");
                         false
                     }
                     Err(e) => {
-                        log(&format!(
-                            "TCP dst ch{}: connect failed slot={}: {}",
-                            self.ch_id, slot, e
-                        ));
+                        tracing::warn!(ch_id = self.ch_id, slot, err = %e, "TCP dst: connect failed");
                         true
                     }
                 }
@@ -1286,7 +1265,7 @@ impl TcpDestChannel {
                     &pack_cid(slot as u16),
                 ));
             }
-            log(&format!("TCP dst ch{}: closed slot={}", self.ch_id, slot));
+            tracing::debug!(ch_id = self.ch_id, slot, "TCP dst: slot closed");
         }
     }
 }
@@ -1325,10 +1304,10 @@ impl Channel for TcpDestChannel {
                 };
                 match action {
                     TDataAction::Close => {
-                        log(&format!(
-                            "TCP dst ch{}: slot={} high-water -- closing",
-                            self.ch_id, slot
-                        ));
+                        tracing::warn!(
+                            ch_id = self.ch_id, slot,
+                            "TCP dst: slot exceeded high-water, closing",
+                        );
                         self.close_slot(slot, true, txq, reg);
                     }
                     TDataAction::Update => self.update_conn_interest(slot, reg),
