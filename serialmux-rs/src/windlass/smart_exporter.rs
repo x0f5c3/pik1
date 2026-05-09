@@ -42,11 +42,11 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::codec::FramedWrite;
 use windlass::{McuConnection, Transport};
 
+use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
-    PayloadTunnelCodec, PayloadTunnelFrame, CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX,
+    CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX, PayloadTunnelCodec, PayloadTunnelFrame,
 };
-use crate::windlass::McuSpec;
 
 /// Run the smart-proxy exporter event loop.
 ///
@@ -85,12 +85,19 @@ pub async fn run_smart_exporter(
         };
 
         // Fetch the MCU dictionary with the high-level McuConnection API.
-        tracing::info!(ch_id, "windlass-bridge smart exporter: fetching MCU dictionary");
+        tracing::info!(
+            ch_id,
+            "windlass-bridge smart exporter: fetching MCU dictionary"
+        );
         let dictionary = match McuConnection::connect(uart).await {
             Ok(conn) => {
                 let dict = conn.raw_dictionary_bytes().to_vec();
                 conn.close().await;
-                tracing::info!(ch_id, bytes = dict.len(), "windlass-bridge smart exporter: dictionary fetched");
+                tracing::info!(
+                    ch_id,
+                    bytes = dict.len(),
+                    "windlass-bridge smart exporter: dictionary fetched"
+                );
                 dict
             }
             Err(e) => {
@@ -138,7 +145,10 @@ pub async fn run_smart_exporter(
                         break;
                     }
                     None => {
-                        tracing::warn!(ch_id, "windlass-bridge smart exporter: MCU transport closed");
+                        tracing::warn!(
+                            ch_id,
+                            "windlass-bridge smart exporter: MCU transport closed"
+                        );
                         break;
                     }
                 }
@@ -185,7 +195,10 @@ pub async fn run_smart_exporter(
                 if let Some(tx) = uart_cmd_txs.get(&pf.ch_id) {
                     let _ = tx.send(pf.payload.to_vec());
                 } else {
-                    tracing::warn!(ch_id = pf.ch_id, "windlass-bridge smart exporter: received frame for unknown channel");
+                    tracing::warn!(
+                        ch_id = pf.ch_id,
+                        "windlass-bridge smart exporter: received frame for unknown channel"
+                    );
                 }
             }
             Some(Err(e)) => {

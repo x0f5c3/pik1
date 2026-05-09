@@ -45,13 +45,10 @@
 //! The tunnel adds only one byte of overhead per frame compared to ~10 bytes
 //! for the serialmux envelope.
 
+use clap::{Args as ClapArgs, Parser, Subcommand};
 use serialmux::windlass::{
-    McuSpec,
-    exporter::run_exporter,
-    host::run_host,
-    smart_exporter::run_smart_exporter,
-    smart_host::run_smart_host,
-    resolve_link_device,
+    McuSpec, exporter::run_exporter, host::run_host, resolve_link_device,
+    smart_exporter::run_smart_exporter, smart_host::run_smart_host,
 };
 
 const DESCRIPTION: &str = r#"windlass-bridge -- native Klipper transport relay over USB CDC.
@@ -106,170 +103,207 @@ EXAMPLES
 // ─────────────────────────────────────────────────────────────────────────────
 
 struct Args {
-    mode:     String,
-    smart:    bool,
+    mode: String,
+    smart: bool,
     link_dev: Option<String>,
-    usb_id:   Option<(String, String)>,
+    usb_id: Option<(String, String)>,
     channels: Vec<McuSpec>,
 }
 
-fn usage_exit(msg: &str) -> ! {
-    eprintln!("windlass-bridge: error: {}", msg);
-    eprintln!("\nRun `windlass-bridge --help` for usage.");
-    std::process::exit(2);
+#[derive(Debug, Parser)]
+#[command(
+    name = "windlass-bridge",
+    long_about = DESCRIPTION,
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    Exporter(ExporterArgs),
+    Host(HostArgs),
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(arg_required_else_help = true)]
+struct ExporterArgs {
+    #[arg(long)]
+    smart: bool,
+
+    #[arg(
+        value_name = "link_dev",
+        conflicts_with = "usb_id",
+        required_unless_present = "usb_id"
+    )]
+    link_dev: Option<String>,
+
+    #[arg(
+        long = "usb",
+        value_name = "VID:PID",
+        conflicts_with = "link_dev",
+        required_unless_present = "link_dev",
+        value_parser = parse_usb_id
+    )]
+    usb_id: Option<(String, String)>,
+
+    #[arg(value_name = "channel_spec", required = true, value_parser = parse_exporter_channel_spec)]
+    channels: Vec<McuSpec>,
+}
+
+#[derive(Debug, ClapArgs)]
+#[command(arg_required_else_help = true)]
+struct HostArgs {
+    #[arg(long)]
+    smart: bool,
+
+    #[arg(
+        value_name = "link_dev",
+        conflicts_with = "usb_id",
+        required_unless_present = "usb_id"
+    )]
+    link_dev: Option<String>,
+
+    #[arg(
+        long = "usb",
+        value_name = "VID:PID",
+        conflicts_with = "link_dev",
+        required_unless_present = "link_dev",
+        value_parser = parse_usb_id
+    )]
+    usb_id: Option<(String, String)>,
+
+    #[arg(value_name = "channel_spec", required = true, value_parser = parse_host_channel_spec)]
+    channels: Vec<McuSpec>,
 }
 
 fn parse_args() -> Args {
-    let raw: Vec<String> = std::env::args().collect();
-    if raw.len() < 2 {
-        usage_exit("too few arguments");
-    }
-    if raw[1] == "-h" || raw[1] == "--help" {
-        print!("{}", DESCRIPTION);
-        std::process::exit(0);
-    }
-
-    let mode = raw[1].clone();
-    if mode != "exporter" && mode != "host" {
-        usage_exit(&format!(
-            "mode must be 'exporter' or 'host', got {:?}",
-            mode
-        ));
-    }
-
-    let mut link_dev: Option<String> = None;
-    let mut usb_id: Option<(String, String)> = None;
-    let mut channel_strs: Vec<String> = Vec::new();
-    let mut smart = false;
-    let mut i = 2usize;
-
-    while i < raw.len() {
-        let arg = &raw[i];
-        if arg == "--smart" {
-            smart = true;
-        } else if arg == "--usb" {
-            i += 1;
-            if i >= raw.len() {
-                usage_exit("--usb requires an argument");
+    match Cli::parse().command {
+        Command::Exporter(args) => {
+            validate_unique_channel_ids(&args.channels);
+            Args {
+                mode: "exporter".to_string(),
+                smart: args.smart,
+                link_dev: args.link_dev,
+                usb_id: args.usb_id,
+                channels: args.channels,
             }
-            usb_id = Some(parse_usb_id(&raw[i]));
-        } else if let Some(val) = arg.strip_prefix("--usb=") {
-            usb_id = Some(parse_usb_id(val));
-        } else if arg.starts_with("mcu:") {
-            channel_strs.push(arg.clone());
-        } else if !arg.starts_with('-') {
-            if link_dev.is_none() && usb_id.is_none() {
-                link_dev = Some(arg.clone());
-            } else if link_dev.is_none() {
-                link_dev = Some(arg.clone());
-            } else {
-                channel_strs.push(arg.clone());
-            }
-        } else {
-            usage_exit(&format!("unknown argument: {:?}", arg));
         }
-        i += 1;
+        Command::Host(args) => {
+            validate_unique_channel_ids(&args.channels);
+            Args {
+                mode: "host".to_string(),
+                smart: args.smart,
+                link_dev: args.link_dev,
+                usb_id: args.usb_id,
+                channels: args.channels,
+            }
+        }
     }
-
-    if link_dev.is_some() && usb_id.is_some() {
-        usage_exit("link_dev and --usb are mutually exclusive");
-    }
-    if link_dev.is_none() && usb_id.is_none() {
-        usage_exit("one of link_dev or --usb is required");
-    }
-    if channel_strs.is_empty() {
-        usage_exit("at least one mcu:<id>:<path>[:<baud>] spec is required");
-    }
-
-    let channels = parse_channel_specs(&mode, &channel_strs);
-    Args { mode, smart, link_dev, usb_id, channels }
 }
 
-fn parse_usb_id(val: &str) -> (String, String) {
-    let parts: Vec<&str> = val.splitn(2, ':').collect();
-    if parts.len() != 2 {
-        usage_exit(&format!(
-            "--usb must be VID:PID (e.g. 1d6b:0104), got {:?}",
-            val
-        ));
-    }
-    for (part, name) in parts.iter().zip(["VID", "PID"].iter()) {
+fn parse_usb_id(val: &str) -> Result<(String, String), String> {
+    let (vid, pid) = val
+        .split_once(':')
+        .ok_or_else(|| format!("--usb must be VID:PID (e.g. 1d6b:0104), got {:?}", val))?;
+
+    for (part, name) in [(vid, "VID"), (pid, "PID")] {
         if part.is_empty() || !part.chars().all(|c| c.is_ascii_hexdigit()) {
-            usage_exit(&format!("{} in {:?} must be a hex string", name, val));
+            return Err(format!("{} in {:?} must be a hex string", name, val));
         }
     }
-    (parts[0].to_lowercase(), parts[1].to_lowercase())
+    Ok((vid.to_lowercase(), pid.to_lowercase()))
 }
 
-fn parse_channel_specs(mode: &str, specs: &[String]) -> Vec<McuSpec> {
-    let valid_bauds: &[u32] = &[
-        1200, 2400, 4800, 9600, 19200, 38400, 57600,
-        115200, 230400, 460800, 921600,
-    ];
-    let mut seen_ids = std::collections::HashSet::<u8>::new();
-    let mut out = Vec::new();
+fn parse_exporter_channel_spec(spec: &str) -> Result<McuSpec, String> {
+    parse_channel_spec("exporter", spec)
+}
 
-    for spec in specs {
-        let parts: Vec<&str> = spec.split(':').collect();
-        if parts.len() < 3 {
-            usage_exit(&format!(
-                "channel spec {:?} too short\n\
-                 exporter: mcu:<id>:<uart_device>:<baud>\n\
-                 host:     mcu:<id>:<socket_path>",
+fn parse_host_channel_spec(spec: &str) -> Result<McuSpec, String> {
+    parse_channel_spec("host", spec)
+}
+
+fn parse_channel_spec(mode: &str, spec: &str) -> Result<McuSpec, String> {
+    let valid_bauds: &[u32] = &[
+        1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600,
+    ];
+
+    let parts: Vec<&str> = spec.split(':').collect();
+    if parts.len() < 3 {
+        return Err(format!(
+            "channel spec {:?} too short\n\
+             exporter: mcu:<id>:<uart_device>:<baud>\n\
+             host:     mcu:<id>:<socket_path>",
+            spec
+        ));
+    }
+
+    if parts[0] != "mcu" {
+        return Err(format!(
+            "unknown channel type {:?} — only 'mcu' is supported by windlass-bridge",
+            parts[0]
+        ));
+    }
+
+    let ch_id = parts[1]
+        .parse()
+        .map_err(|_| format!("channel id in {:?} must be 0-255", spec))?;
+
+    if mode == "exporter" {
+        if parts.len() != 4 {
+            return Err(format!(
+                "exporter mcu spec {:?}: need mcu:<id>:<device>:<baud>",
                 spec
             ));
         }
-        if parts[0] != "mcu" {
-            usage_exit(&format!(
-                "unknown channel type {:?} — only 'mcu' is supported by windlass-bridge",
-                parts[0]
+        let baud = parse_standard_baud(parts[3], spec, valid_bauds)?;
+        Ok(McuSpec {
+            ch_id,
+            path: parts[2].to_string(),
+            baud,
+        })
+    } else {
+        if parts.len() < 3 || parts.len() > 4 {
+            return Err(format!(
+                "host mcu spec {:?}: need mcu:<id>:<socket_path>",
+                spec
             ));
         }
+        Ok(McuSpec {
+            ch_id,
+            path: parts[2].to_string(),
+            baud: 0,
+        })
+    }
+}
 
-        let ch_id: u8 = parts[1]
-            .parse()
-            .unwrap_or_else(|_| usage_exit(&format!("channel id in {:?} must be 0-255", spec)));
-        if !seen_ids.insert(ch_id) {
-            usage_exit(&format!("duplicate channel id {} in {:?}", ch_id, spec));
-        }
+fn parse_standard_baud(raw: &str, spec: &str, valid_bauds: &[u32]) -> Result<u32, String> {
+    let baud = raw
+        .parse()
+        .map_err(|_| format!("baud in {:?} is not a number", spec))?;
+    if !valid_bauds.contains(&baud) {
+        return Err(format!(
+            "baud {} in {:?} is not a standard value",
+            baud, spec
+        ));
+    }
+    Ok(baud)
+}
 
-        if mode == "exporter" {
-            if parts.len() != 4 {
-                usage_exit(&format!(
-                    "exporter mcu spec {:?}: need mcu:<id>:<device>:<baud>",
-                    spec
-                ));
-            }
-            let baud: u32 = parts[3].parse().unwrap_or_else(|_| {
-                usage_exit(&format!("baud in {:?} is not a number", spec))
-            });
-            if !valid_bauds.contains(&baud) {
-                usage_exit(&format!(
-                    "baud {} in {:?} is not a standard value",
-                    baud, spec
-                ));
-            }
-            out.push(McuSpec {
-                ch_id,
-                path: parts[2].to_string(),
-                baud,
-            });
-        } else {
-            // host: mcu:<id>:<socket_path>  (baud field ignored)
-            if parts.len() < 3 || parts.len() > 4 {
-                usage_exit(&format!(
-                    "host mcu spec {:?}: need mcu:<id>:<socket_path>",
-                    spec
-                ));
-            }
-            out.push(McuSpec {
-                ch_id,
-                path: parts[2].to_string(),
-                baud: 0,
-            });
+fn validate_unique_channel_ids(channels: &[McuSpec]) {
+    let mut seen_ids = std::collections::HashSet::<u8>::new();
+    for channel in channels {
+        if !seen_ids.insert(channel.ch_id) {
+            clap::Error::raw(
+                clap::error::ErrorKind::ValueValidation,
+                format!("duplicate channel id {}", channel.ch_id),
+            )
+            .exit();
         }
     }
-    out
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,9 +317,7 @@ async fn main() {
 
     let link_device = resolve_link_device(
         args.link_dev.as_deref(),
-        args.usb_id
-            .as_ref()
-            .map(|(v, p)| (v.as_str(), p.as_str())),
+        args.usb_id.as_ref().map(|(v, p)| (v.as_str(), p.as_str())),
     );
 
     let result = if args.mode == "exporter" {

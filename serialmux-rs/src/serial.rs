@@ -45,9 +45,7 @@ pub(crate) fn close_raw(fd: RawFd) {
 pub fn read_nonblock(fd: RawFd, buf: &mut [u8]) -> std::io::Result<Option<usize>> {
     // SAFETY: `fd` is a valid non-blocking fd; `buf` is valid for writes
     // of up to `buf.len()` bytes.
-    let n = unsafe {
-        libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len())
-    };
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
     if n < 0 {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error()
@@ -66,9 +64,7 @@ pub fn read_nonblock(fd: RawFd, buf: &mut [u8]) -> std::io::Result<Option<usize>
 pub fn write_nonblock(fd: RawFd, buf: &[u8]) -> std::io::Result<usize> {
     // SAFETY: `fd` is a valid non-blocking fd; `buf` is valid for reads
     // of up to `buf.len()` bytes.
-    let n = unsafe {
-        libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len())
-    };
+    let n = unsafe { libc::write(fd, buf.as_ptr() as *const libc::c_void, buf.len()) };
     if n < 0 {
         let e = std::io::Error::last_os_error();
         if e.raw_os_error()
@@ -114,26 +110,26 @@ pub fn open_serial_fd(dev: &str, baud: u32) -> std::io::Result<RawFd> {
 fn baud_to_speed(baud: u32) -> Option<nix::sys::termios::BaudRate> {
     use nix::sys::termios::BaudRate::*;
     Some(match baud {
-        1200   => B1200,
-        2400   => B2400,
-        4800   => B4800,
-        9600   => B9600,
-        19200  => B19200,
-        38400  => B38400,
-        57600  => B57600,
+        1200 => B1200,
+        2400 => B2400,
+        4800 => B4800,
+        9600 => B9600,
+        19200 => B19200,
+        38400 => B38400,
+        57600 => B57600,
         115200 => B115200,
         230400 => B230400,
         460800 => B460800,
         921600 => B921600,
-        _      => return None,
+        _ => return None,
     })
 }
 
 /// Configure `fd` for raw binary communication at `baud` bps.
 fn apply_termios(fd: RawFd, baud: u32) -> std::io::Result<()> {
     use nix::sys::termios::{
-        cfsetspeed, tcgetattr, tcsetattr, ControlFlags, InputFlags, LocalFlags,
-        OutputFlags, SetArg, SpecialCharacterIndices as SCI,
+        ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg, SpecialCharacterIndices as SCI,
+        cfsetspeed, tcgetattr, tcsetattr,
     };
     let speed = baud_to_speed(baud).ok_or_else(|| {
         std::io::Error::new(
@@ -144,11 +140,11 @@ fn apply_termios(fd: RawFd, baud: u32) -> std::io::Result<()> {
     // SAFETY: `fd` is a valid open terminal file descriptor.
     let bfd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
     let mut attrs = tcgetattr(bfd).map_err(nix_to_io)?;
-    attrs.input_flags   = InputFlags::empty();
-    attrs.output_flags  = OutputFlags::empty();
+    attrs.input_flags = InputFlags::empty();
+    attrs.output_flags = OutputFlags::empty();
     attrs.control_flags = ControlFlags::CREAD | ControlFlags::CLOCAL | ControlFlags::CS8;
-    attrs.local_flags   = LocalFlags::empty();
-    attrs.control_chars[SCI::VMIN  as usize] = 0;
+    attrs.local_flags = LocalFlags::empty();
+    attrs.control_chars[SCI::VMIN as usize] = 0;
     attrs.control_chars[SCI::VTIME as usize] = 0;
     cfsetspeed(&mut attrs, speed).map_err(nix_to_io)?;
     // SAFETY: same `fd`.
@@ -169,7 +165,7 @@ pub fn open_pty_raw(baud: u32) -> std::io::Result<(RawFd, RawFd)> {
     use std::os::unix::io::IntoRawFd;
     let result = nix::pty::openpty(None, None).map_err(nix_to_io)?;
     let master_fd: RawFd = result.master.into_raw_fd();
-    let slave_fd:  RawFd = result.slave.into_raw_fd();
+    let slave_fd: RawFd = result.slave.into_raw_fd();
     apply_termios(slave_fd, baud)?;
     set_nonblock(master_fd)?;
     Ok((master_fd, slave_fd))
@@ -204,11 +200,10 @@ pub fn find_acm_by_usb_id(vid: &str, pid: &str) -> Option<String> {
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
-        let mut cur = std::fs::canonicalize(entry.path())
-            .unwrap_or_else(|_| entry.path());
+        let mut cur = std::fs::canonicalize(entry.path()).unwrap_or_else(|_| entry.path());
 
         for _ in 0..8 {
-            let vendor_p  = cur.join("idVendor");
+            let vendor_p = cur.join("idVendor");
             let product_p = cur.join("idProduct");
             match (
                 std::fs::read_to_string(&vendor_p),

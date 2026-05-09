@@ -134,7 +134,11 @@ pub fn wait_for_acm(vid: &str, pid: &str) -> String {
         }
         let now = Instant::now();
         if now.duration_since(last_log) >= Duration::from_secs(10) {
-            tracing::info!(vid, pid, "windlass-bridge: USB device not yet present, waiting");
+            tracing::info!(
+                vid,
+                pid,
+                "windlass-bridge: USB device not yet present, waiting"
+            );
             last_log = now;
         }
         std::thread::sleep(Duration::from_millis(500));
@@ -154,14 +158,113 @@ pub fn resolve_link_device(link_dev: Option<&str>, usb_id: Option<(&str, &str)>)
     unreachable!("caller must supply link_dev or usb_id")
 }
 
-/// Ensure the parent directory of `path` exists, then remove any stale
+/// Ensure the parent directory of `path` exists, then remove any stale Unix
 /// socket or symlink at that path so `UnixListener::bind` won't fail.
+///
+/// Returns an error if `path` already exists as a non-socket, non-symlink file.
 pub fn prepare_socket_path(path: &str) -> std::io::Result<()> {
+    use std::io;
+    use std::os::unix::fs::FileTypeExt as _;
+
     let p = PathBuf::from(path);
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Remove stale socket / symlink from a previous run.
-    let _ = std::fs::remove_file(&p);
+
+    match std::fs::symlink_metadata(&p) {
+        Ok(meta) => {
+            let file_type = meta.file_type();
+            if file_type.is_socket() || file_type.is_symlink() {
+                std::fs::remove_file(&p)?;
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    format!("refusing to remove non-socket file at {}", p.display()),
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::prepare_socket_path;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let mut path = std::env::temp_dir();
+            let unique = format!(
+                "serialmux-windlass-test-{}-{}",
+                std::process::id(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            path.push(unique);
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        fn join(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn path_str(path: &Path) -> &str {
+        path.to_str().unwrap()
+    }
+
+    #[test]
+    fn prepare_socket_path_removes_stale_socket() {
+        let dir = TestDir::new();
+        let socket_path = dir.join("klipper.sock");
+        let _listener = UnixListener::bind(&socket_path).unwrap();
+
+        prepare_socket_path(path_str(&socket_path)).unwrap();
+
+        assert!(!socket_path.exists());
+    }
+
+    #[test]
+    fn prepare_socket_path_removes_symlink() {
+        let dir = TestDir::new();
+        let target = dir.join("target");
+        let link = dir.join("klipper.sock");
+        fs::write(&target, b"target").unwrap();
+        symlink(&target, &link).unwrap();
+
+        prepare_socket_path(path_str(&link)).unwrap();
+
+        assert!(!link.exists());
+        assert!(target.exists());
+    }
+
+    #[test]
+    fn prepare_socket_path_rejects_regular_file() {
+        let dir = TestDir::new();
+        let file_path = dir.join("not-a-socket");
+        fs::write(&file_path, b"regular file").unwrap();
+
+        let err = prepare_socket_path(path_str(&file_path)).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert!(file_path.exists());
+    }
 }

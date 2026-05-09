@@ -17,12 +17,11 @@ use mio::unix::SourceFd;
 use mio::{Interest, Registry, Token};
 
 use crate::protocol::{
-    build_frame, TxQueue, F_DATA, F_FLUSH, F_READY, F_TCLOSE, F_TCONN, F_TDATA,
-    KLIPPER_SYNC, MAX_PAYLOAD,
+    F_DATA, F_FLUSH, F_READY, F_TCLOSE, F_TCONN, F_TDATA, KLIPPER_SYNC, MAX_PAYLOAD, TxQueue,
+    build_frame,
 };
 use crate::serial::{
-    close_raw, open_pty_raw, open_serial_fd, pty_slave_name, read_nonblock,
-    write_nonblock,
+    close_raw, open_pty_raw, open_serial_fd, pty_slave_name, read_nonblock, write_nonblock,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -94,11 +93,11 @@ pub trait Channel {
     /// A mio event fired for one of this channel's registered fds.
     fn handle_event(
         &mut self,
-        token:    Token,
+        token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     );
 
     /// Close all fds and deregister from mio.
@@ -158,18 +157,18 @@ enum McuState {
 /// active, and transitions back to `Resetting` after [`RESET_SILENCE`] of
 /// silence.
 pub struct McuChannel {
-    ch_id:    u8,
-    device:   String,
-    baud:     u32,
-    state:    McuState,
-    fd:       Option<RawFd>,
+    ch_id: u8,
+    device: String,
+    baud: u32,
+    state: McuState,
+    fd: Option<RawFd>,
     fd_in_sel: bool,
     /// Pending bytes to write to the UART (from the host).
-    txbuf:    Vec<u8>,
-    last_rx:  Option<Instant>,
+    txbuf: Vec<u8>,
+    last_rx: Option<Instant>,
     reopen_at: Option<Instant>,
     bp_paused: bool,
-    link_up:   bool,
+    link_up: bool,
 }
 
 /// How long the MCU must be silent before we declare a reset.
@@ -200,7 +199,7 @@ impl McuChannel {
     fn open_uart(&mut self, reg: &Registry) {
         match open_serial_fd(&self.device, self.baud) {
             Ok(fd) => {
-                self.fd        = Some(fd);
+                self.fd = Some(fd);
                 self.fd_in_sel = false;
                 tracing::info!(
                     ch_id = self.ch_id, device = %self.device, baud = self.baud,
@@ -234,17 +233,28 @@ impl McuChannel {
             Some(f) => f,
             None => return,
         };
-        let mut interest = if self.bp_paused { None } else { Some(Interest::READABLE) };
+        let mut interest = if self.bp_paused {
+            None
+        } else {
+            Some(Interest::READABLE)
+        };
         if !self.txbuf.is_empty() {
-            interest =
-                Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
+            interest = Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
         }
         let token = primary_token(self.ch_id);
         match (interest, self.fd_in_sel) {
-            (None, true)     => { reg_del(reg, fd); self.fd_in_sel = false; }
-            (None, false)    => {}
-            (Some(i), false) => { reg_add(reg, fd, token, i); self.fd_in_sel = true; }
-            (Some(i), true)  => { reg_mod(reg, fd, token, i); }
+            (None, true) => {
+                reg_del(reg, fd);
+                self.fd_in_sel = false;
+            }
+            (None, false) => {}
+            (Some(i), false) => {
+                reg_add(reg, fd, token, i);
+                self.fd_in_sel = true;
+            }
+            (Some(i), true) => {
+                reg_mod(reg, fd, token, i);
+            }
         }
     }
 
@@ -264,16 +274,13 @@ impl McuChannel {
                         // Wait for Klipper sync byte 0x7E before forwarding.
                         if let Some(idx) = data.iter().position(|&b| b == KLIPPER_SYNC) {
                             tracing::info!(
-                                ch_id = self.ch_id, sync_offset = idx,
+                                ch_id = self.ch_id,
+                                sync_offset = idx,
                                 "MCU UART: 0x7E seen, transitioning to ACTIVE",
                             );
                             self.transition(McuState::Active, txq);
                             if self.link_up {
-                                txq.enqueue(&build_frame(
-                                    F_DATA,
-                                    self.ch_id,
-                                    &data[idx..],
-                                ));
+                                txq.enqueue(&build_frame(F_DATA, self.ch_id, &data[idx..]));
                             }
                         }
                         // Bootloader noise before sync — discard.
@@ -343,7 +350,9 @@ impl McuChannel {
 }
 
 impl Channel for McuChannel {
-    fn channel_id(&self) -> u8 { self.ch_id }
+    fn channel_id(&self) -> u8 {
+        self.ch_id
+    }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], _txq: &mut TxQueue, reg: &Registry) {
         if ftype == F_DATA {
@@ -399,17 +408,23 @@ impl Channel for McuChannel {
 
     fn handle_event(
         &mut self,
-        _token:   Token,
+        _token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
-        if readable { self.uart_read(txq, reg); }
-        if writable { self.uart_drain(reg); }
+        if readable {
+            self.uart_read(txq, reg);
+        }
+        if writable {
+            self.uart_drain(reg);
+        }
     }
 
-    fn close(&mut self, reg: &Registry) { self.close_uart(reg); }
+    fn close(&mut self, reg: &Registry) {
+        self.close_uart(reg);
+    }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
         if !self.bp_paused {
@@ -439,15 +454,15 @@ impl Channel for McuChannel {
 /// The PTY is opened on receipt of `F_READY` and closed on `F_FLUSH` or link
 /// disconnect.
 pub struct PtyChannel {
-    ch_id:          u8,
-    symlink:        String,
-    baud:           u32,
-    master_fd:      Option<RawFd>,
-    slave_fd:       Option<RawFd>,
-    master_in_sel:  bool,
+    ch_id: u8,
+    symlink: String,
+    baud: u32,
+    master_fd: Option<RawFd>,
+    slave_fd: Option<RawFd>,
+    master_in_sel: bool,
     /// Bytes to write to the PTY master (from the link).
-    txbuf:          Vec<u8>,
-    bp_paused:      bool,
+    txbuf: Vec<u8>,
+    bp_paused: bool,
 }
 
 impl PtyChannel {
@@ -487,8 +502,8 @@ impl PtyChannel {
                         close_raw(slave);
                         return;
                     }
-                    self.master_fd     = Some(master);
-                    self.slave_fd      = Some(slave);
+                    self.master_fd = Some(master);
+                    self.slave_fd = Some(slave);
                     self.master_in_sel = false;
                     self.update_interest(reg);
                     tracing::info!(
@@ -535,17 +550,28 @@ impl PtyChannel {
             Some(f) => f,
             None => return,
         };
-        let mut interest = if self.bp_paused { None } else { Some(Interest::READABLE) };
+        let mut interest = if self.bp_paused {
+            None
+        } else {
+            Some(Interest::READABLE)
+        };
         if !self.txbuf.is_empty() {
-            interest =
-                Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
+            interest = Some(interest.map_or(Interest::WRITABLE, |i| i | Interest::WRITABLE));
         }
         let token = primary_token(self.ch_id);
         match (interest, self.master_in_sel) {
-            (None, true)     => { reg_del(reg, fd); self.master_in_sel = false; }
-            (None, false)    => {}
-            (Some(i), false) => { reg_add(reg, fd, token, i); self.master_in_sel = true; }
-            (Some(i), true)  => { reg_mod(reg, fd, token, i); }
+            (None, true) => {
+                reg_del(reg, fd);
+                self.master_in_sel = false;
+            }
+            (None, false) => {}
+            (Some(i), false) => {
+                reg_add(reg, fd, token, i);
+                self.master_in_sel = true;
+            }
+            (Some(i), true) => {
+                reg_mod(reg, fd, token, i);
+            }
         }
     }
 
@@ -559,7 +585,9 @@ impl PtyChannel {
         }
         match write_nonblock(fd, &self.txbuf) {
             Ok(0) => {}
-            Ok(n) => { self.txbuf.drain(..n); }
+            Ok(n) => {
+                self.txbuf.drain(..n);
+            }
             Err(e) => {
                 tracing::error!(ch_id = self.ch_id, err = %e, "PTY write error");
                 self.txbuf.clear();
@@ -570,7 +598,9 @@ impl PtyChannel {
 }
 
 impl Channel for PtyChannel {
-    fn channel_id(&self) -> u8 { self.ch_id }
+    fn channel_id(&self) -> u8 {
+        self.ch_id
+    }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], _txq: &mut TxQueue, reg: &Registry) {
         match ftype {
@@ -603,15 +633,17 @@ impl Channel for PtyChannel {
     }
 
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
-    fn next_deadline(&self) -> Option<Instant> { None }
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
 
     fn handle_event(
         &mut self,
-        _token:   Token,
+        _token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
         if readable {
             let fd = match self.master_fd {
@@ -637,7 +669,9 @@ impl Channel for PtyChannel {
         }
     }
 
-    fn close(&mut self, reg: &Registry) { self.close_pty(reg); }
+    fn close(&mut self, reg: &Registry) {
+        self.close_pty(reg);
+    }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
         if !self.bp_paused {
@@ -659,7 +693,9 @@ impl Channel for PtyChannel {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Wire connection-id helpers.
-fn pack_cid(cid: u16) -> [u8; 2] { cid.to_le_bytes() }
+fn pack_cid(cid: u16) -> [u8; 2] {
+    cid.to_le_bytes()
+}
 
 fn unpack_cid(payload: &[u8]) -> Option<(u16, &[u8])> {
     if payload.len() < 2 {
@@ -673,13 +709,13 @@ const CONN_HIGH_WATER: usize = 256 * 1024;
 
 /// State for a single TCP connection slot.
 struct TcpConn {
-    stream:        mio::net::TcpStream,
+    stream: mio::net::TcpStream,
     /// Bytes waiting to be written to the stream.
-    txbuf:         Vec<u8>,
+    txbuf: Vec<u8>,
     /// Async connect in progress.
-    connecting:    bool,
+    connecting: bool,
     /// Registered with mio.
-    in_sel:        bool,
+    in_sel: bool,
     /// Peer sent F_TCLOSE; drain `txbuf` then close without sending F_TCLOSE back.
     close_pending: bool,
 }
@@ -695,36 +731,37 @@ struct TcpConn {
 /// index 0..`MAX_TCP_CONNS` — this matches the C `cid` field and is identical
 /// on the wire.
 pub struct TcpSourceChannel {
-    ch_id:    u8,
+    ch_id: u8,
     listener: mio::net::TcpListener,
     /// Connection slots.  `None` = empty.
-    conns:    Vec<Option<TcpConn>>,
+    conns: Vec<Option<TcpConn>>,
     next_slot: usize,
-    link_up:   bool,
+    link_up: bool,
     bp_paused: bool,
 }
 
 impl TcpSourceChannel {
     /// Create a new source channel that listens on `bind_addr:bind_port`.
     pub fn new(
-        ch_id:      u8,
-        bind_addr:  &str,
-        bind_port:  u16,
-        reg:        &Registry,
+        ch_id: u8,
+        bind_addr: &str,
+        bind_port: u16,
+        reg: &Registry,
     ) -> std::io::Result<Self> {
         let addr = format!("{}:{}", bind_addr, bind_port)
             .parse()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput,
-                                              format!("bad addr: {}", e)))?;
+            .map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("bad addr: {}", e))
+            })?;
         let mut listener = mio::net::TcpListener::bind(addr)?;
         reg.register(&mut listener, primary_token(ch_id), Interest::READABLE)?;
         tracing::info!(ch_id, bind_addr, bind_port, "TCP source listening");
         Ok(TcpSourceChannel {
             ch_id,
             listener,
-            conns:     (0..MAX_TCP_CONNS).map(|_| None).collect(),
+            conns: (0..MAX_TCP_CONNS).map(|_| None).collect(),
             next_slot: 0,
-            link_up:   false,
+            link_up: false,
             bp_paused: false,
         })
     }
@@ -759,11 +796,9 @@ impl TcpSourceChannel {
                         }
                     };
                     let token = tcp_slot_token(self.ch_id, slot);
-                    if let Err(e) = reg.register(
-                        &mut stream,
-                        token,
-                        Interest::READABLE | Interest::WRITABLE,
-                    ) {
+                    if let Err(e) =
+                        reg.register(&mut stream, token, Interest::READABLE | Interest::WRITABLE)
+                    {
                         tracing::warn!(ch_id = self.ch_id, err = %e, "TCP src: register error");
                         drop(stream);
                         continue;
@@ -771,16 +806,12 @@ impl TcpSourceChannel {
                     tracing::info!(ch_id = self.ch_id, %addr, slot, "TCP src: accepted");
                     self.conns[slot] = Some(TcpConn {
                         stream,
-                        txbuf:         Vec::new(),
-                        connecting:    false,
-                        in_sel:        true,
+                        txbuf: Vec::new(),
+                        connecting: false,
+                        in_sel: true,
                         close_pending: false,
                     });
-                    txq.enqueue(&build_frame(
-                        F_TCONN,
-                        self.ch_id,
-                        &pack_cid(slot as u16),
-                    ));
+                    txq.enqueue(&build_frame(F_TCONN, self.ch_id, &pack_cid(slot as u16)));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
@@ -793,11 +824,11 @@ impl TcpSourceChannel {
 
     fn tcp_event(
         &mut self,
-        token:    Token,
+        token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
         let slot = (token.0 - TCP_BASE) % MAX_TCP_CONNS;
 
@@ -811,7 +842,9 @@ impl TcpSourceChannel {
                         Some(c) => c,
                         None => return,
                     };
-                    if conn.close_pending { break; }
+                    if conn.close_pending {
+                        break;
+                    }
                     use std::io::Read;
                     match conn.stream.read(&mut buf) {
                         Ok(0) => (true, 0),
@@ -847,11 +880,16 @@ impl TcpSourceChannel {
                 if !conn.txbuf.is_empty() {
                     use std::io::Write;
                     match conn.stream.write(&conn.txbuf) {
-                        Ok(n) => { conn.txbuf.drain(..n); false }
+                        Ok(n) => {
+                            conn.txbuf.drain(..n);
+                            false
+                        }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
                         Err(_) => true,
                     }
-                } else { false }
+                } else {
+                    false
+                }
             };
             if write_err {
                 self.close_slot(slot, true, txq, reg);
@@ -871,28 +909,18 @@ impl TcpSourceChannel {
     }
 
     fn update_conn_interest(&mut self, slot: usize, reg: &Registry) {
-        let ch_id     = self.ch_id;
+        let ch_id = self.ch_id;
         let bp_paused = self.bp_paused;
         if let Some(conn) = self.conns[slot].as_mut() {
             src_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
         }
     }
 
-    fn close_slot(
-        &mut self,
-        slot:   usize,
-        notify: bool,
-        txq:    &mut TxQueue,
-        reg:    &Registry,
-    ) {
+    fn close_slot(&mut self, slot: usize, notify: bool, txq: &mut TxQueue, reg: &Registry) {
         if let Some(mut conn) = self.conns[slot].take() {
             let _ = reg.deregister(&mut conn.stream);
             if notify && self.link_up {
-                txq.enqueue(&build_frame(
-                    F_TCLOSE,
-                    self.ch_id,
-                    &pack_cid(slot as u16),
-                ));
+                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
             }
             tracing::debug!(ch_id = self.ch_id, slot, "TCP src: slot closed");
         }
@@ -906,7 +934,9 @@ impl TcpSourceChannel {
 }
 
 impl Channel for TcpSourceChannel {
-    fn channel_id(&self) -> u8 { self.ch_id }
+    fn channel_id(&self) -> u8 {
+        self.ch_id
+    }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], txq: &mut TxQueue, reg: &Registry) {
         let (cid, data) = match unpack_cid(payload) {
@@ -914,17 +944,24 @@ impl Channel for TcpSourceChannel {
             None => return,
         };
         let slot = cid as usize;
-        if slot >= MAX_TCP_CONNS { return; }
+        if slot >= MAX_TCP_CONNS {
+            return;
+        }
 
         match ftype {
             F_TDATA => {
-                if data.is_empty() { return; }
+                if data.is_empty() {
+                    return;
+                }
                 // Use a flag to avoid holding the `conn` borrow across `close_slot`
                 // and `update_conn_interest`, which both need `&mut self`.
-                enum TDataAction { Close, Update, Skip }
+                enum TDataAction {
+                    Close,
+                    Update,
+                    Skip,
+                }
                 let action = if let Some(conn) = self.conns[slot].as_mut() {
-                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
-                        .saturating_sub(conn.txbuf.len());
+                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD).saturating_sub(conn.txbuf.len());
                     if conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
                         TDataAction::Close
                     } else {
@@ -937,13 +974,14 @@ impl Channel for TcpSourceChannel {
                 match action {
                     TDataAction::Close => {
                         tracing::warn!(
-                            ch_id = self.ch_id, slot,
+                            ch_id = self.ch_id,
+                            slot,
                             "TCP src: slot exceeded high-water, closing",
                         );
                         self.close_slot(slot, true, txq, reg);
                     }
                     TDataAction::Update => self.update_conn_interest(slot, reg),
-                    TDataAction::Skip   => {}
+                    TDataAction::Skip => {}
                 }
             }
             F_TCLOSE => {
@@ -954,7 +992,9 @@ impl Channel for TcpSourceChannel {
                         conn.close_pending = true;
                         false
                     }
-                } else { return; };
+                } else {
+                    return;
+                };
                 if should_close {
                     self.close_slot(slot, false, txq, reg);
                 } else {
@@ -976,18 +1016,22 @@ impl Channel for TcpSourceChannel {
     }
 
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
-    fn next_deadline(&self) -> Option<Instant> { None }
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
 
     fn handle_event(
         &mut self,
-        token:    Token,
+        token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
         if token == primary_token(self.ch_id) {
-            if readable { self.accept(txq, reg); }
+            if readable {
+                self.accept(txq, reg);
+            }
         } else {
             self.tcp_event(token, readable, writable, txq, reg);
         }
@@ -1000,7 +1044,9 @@ impl Channel for TcpSourceChannel {
     }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
-        if self.bp_paused { return; }
+        if self.bp_paused {
+            return;
+        }
         self.bp_paused = true;
         for slot in 0..MAX_TCP_CONNS {
             self.update_conn_interest(slot, reg);
@@ -1008,7 +1054,9 @@ impl Channel for TcpSourceChannel {
     }
 
     fn resume_source_reads(&mut self, reg: &Registry) {
-        if !self.bp_paused { return; }
+        if !self.bp_paused {
+            return;
+        }
         self.bp_paused = false;
         for slot in 0..MAX_TCP_CONNS {
             self.update_conn_interest(slot, reg);
@@ -1023,21 +1071,23 @@ impl Channel for TcpSourceChannel {
 ///   (no point reading when we will close after the final write)
 /// - writes are requested whenever `txbuf` is non-empty
 fn src_conn_update_interest(
-    ch_id:     u8,
+    ch_id: u8,
     bp_paused: bool,
-    slot:      usize,
-    conn:      &mut TcpConn,
-    reg:       &Registry,
+    slot: usize,
+    conn: &mut TcpConn,
+    reg: &Registry,
 ) {
-    if !conn.in_sel { return; }
+    if !conn.in_sel {
+        return;
+    }
     // Pause reads when backpressured or when waiting to drain before close.
-    let want_read  = !(bp_paused || conn.close_pending);
+    let want_read = !(bp_paused || conn.close_pending);
     let want_write = !conn.txbuf.is_empty();
     let interest = match (want_read, want_write) {
-        (true,  true)  => Interest::READABLE | Interest::WRITABLE,
-        (true,  false) => Interest::READABLE,
-        (false, true)  => Interest::WRITABLE,
-        (false, false) => return,  // deregister to avoid spurious wakeups
+        (true, true) => Interest::READABLE | Interest::WRITABLE,
+        (true, false) => Interest::READABLE,
+        (false, true) => Interest::WRITABLE,
+        (false, false) => return, // deregister to avoid spurious wakeups
     };
     let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
 }
@@ -1052,11 +1102,11 @@ fn src_conn_update_interest(
 /// destination address.  Data is forwarded bidirectionally until one side
 /// sends `F_TCLOSE`.
 pub struct TcpDestChannel {
-    ch_id:     u8,
+    ch_id: u8,
     dest_addr: String,
     dest_port: u16,
     /// Connection slots.  `None` = empty.
-    conns:     Vec<Option<TcpConn>>,
+    conns: Vec<Option<TcpConn>>,
     bp_paused: bool,
 }
 
@@ -1068,7 +1118,7 @@ impl TcpDestChannel {
             ch_id,
             dest_addr,
             dest_port,
-            conns:     (0..MAX_TCP_CONNS).map(|_| None).collect(),
+            conns: (0..MAX_TCP_CONNS).map(|_| None).collect(),
             bp_paused: false,
         }
     }
@@ -1078,11 +1128,7 @@ impl TcpDestChannel {
         let addr: std::net::SocketAddr = match addr_str.parse() {
             Ok(a) => a,
             Err(_) => {
-                txq.enqueue(&build_frame(
-                    F_TCLOSE,
-                    self.ch_id,
-                    &pack_cid(slot as u16),
-                ));
+                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
                 return;
             }
         };
@@ -1090,24 +1136,15 @@ impl TcpDestChannel {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(ch_id = self.ch_id, slot, err = %e, "TCP dst: connect failed");
-                txq.enqueue(&build_frame(
-                    F_TCLOSE,
-                    self.ch_id,
-                    &pack_cid(slot as u16),
-                ));
+                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
                 return;
             }
         };
         let _ = stream.set_nodelay(true);
         let token = tcp_slot_token(self.ch_id, slot);
-        if let Err(e) = reg.register(&mut stream, token,
-                                     Interest::READABLE | Interest::WRITABLE) {
+        if let Err(e) = reg.register(&mut stream, token, Interest::READABLE | Interest::WRITABLE) {
             tracing::warn!(ch_id = self.ch_id, slot, err = %e, "TCP dst: register error");
-            txq.enqueue(&build_frame(
-                F_TCLOSE,
-                self.ch_id,
-                &pack_cid(slot as u16),
-            ));
+            txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
             return;
         }
         tracing::info!(
@@ -1116,20 +1153,20 @@ impl TcpDestChannel {
         );
         self.conns[slot] = Some(TcpConn {
             stream,
-            txbuf:         Vec::new(),
-            connecting:    true,
-            in_sel:        true,
+            txbuf: Vec::new(),
+            connecting: true,
+            in_sel: true,
             close_pending: false,
         });
     }
 
     fn tcp_event(
         &mut self,
-        token:    Token,
+        token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
         let slot = (token.0 - TCP_BASE) % MAX_TCP_CONNS;
 
@@ -1151,7 +1188,9 @@ impl TcpDestChannel {
                         true
                     }
                 }
-            } else { false }
+            } else {
+                false
+            }
         };
         if connect_failed {
             self.close_slot(slot, true, txq, reg);
@@ -1168,11 +1207,16 @@ impl TcpDestChannel {
                 if !conn.connecting && !conn.txbuf.is_empty() {
                     use std::io::Write;
                     match conn.stream.write(&conn.txbuf) {
-                        Ok(n) => { conn.txbuf.drain(..n); false }
+                        Ok(n) => {
+                            conn.txbuf.drain(..n);
+                            false
+                        }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
                         Err(_) => true,
                     }
-                } else { false }
+                } else {
+                    false
+                }
             };
             if write_err {
                 self.close_slot(slot, true, txq, reg);
@@ -1198,7 +1242,9 @@ impl TcpDestChannel {
                         Some(c) => c,
                         None => return,
                     };
-                    if conn.connecting || conn.close_pending { break; }
+                    if conn.connecting || conn.close_pending {
+                        break;
+                    }
                     use std::io::Read;
                     match conn.stream.read(&mut buf) {
                         Ok(0) => (true, 0),
@@ -1224,7 +1270,7 @@ impl TcpDestChannel {
         }
 
         // ── Update interest ───────────────────────────────────────────────
-        let ch_id     = self.ch_id;
+        let ch_id = self.ch_id;
         let bp_paused = self.bp_paused;
         if let Some(conn) = self.conns[slot].as_mut() {
             dst_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
@@ -1232,7 +1278,7 @@ impl TcpDestChannel {
     }
 
     fn update_conn_interest(&mut self, slot: usize, reg: &Registry) {
-        let ch_id     = self.ch_id;
+        let ch_id = self.ch_id;
         let bp_paused = self.bp_paused;
         if let Some(conn) = self.conns[slot].as_mut() {
             dst_conn_update_interest(ch_id, bp_paused, slot, conn, reg);
@@ -1240,7 +1286,7 @@ impl TcpDestChannel {
     }
 
     fn update_conn_interest_all(&mut self, reg: &Registry) {
-        let ch_id     = self.ch_id;
+        let ch_id = self.ch_id;
         let bp_paused = self.bp_paused;
         for slot in 0..MAX_TCP_CONNS {
             if let Some(conn) = self.conns[slot].as_mut() {
@@ -1249,21 +1295,11 @@ impl TcpDestChannel {
         }
     }
 
-    fn close_slot(
-        &mut self,
-        slot:   usize,
-        notify: bool,
-        txq:    &mut TxQueue,
-        reg:    &Registry,
-    ) {
+    fn close_slot(&mut self, slot: usize, notify: bool, txq: &mut TxQueue, reg: &Registry) {
         if let Some(mut conn) = self.conns[slot].take() {
             let _ = reg.deregister(&mut conn.stream);
             if notify {
-                txq.enqueue(&build_frame(
-                    F_TCLOSE,
-                    self.ch_id,
-                    &pack_cid(slot as u16),
-                ));
+                txq.enqueue(&build_frame(F_TCLOSE, self.ch_id, &pack_cid(slot as u16)));
             }
             tracing::debug!(ch_id = self.ch_id, slot, "TCP dst: slot closed");
         }
@@ -1271,7 +1307,9 @@ impl TcpDestChannel {
 }
 
 impl Channel for TcpDestChannel {
-    fn channel_id(&self) -> u8 { self.ch_id }
+    fn channel_id(&self) -> u8 {
+        self.ch_id
+    }
 
     fn on_frame(&mut self, ftype: u8, payload: &[u8], txq: &mut TxQueue, reg: &Registry) {
         let (cid, data) = match unpack_cid(payload) {
@@ -1279,7 +1317,9 @@ impl Channel for TcpDestChannel {
             None => return,
         };
         let slot = cid as usize;
-        if slot >= MAX_TCP_CONNS { return; }
+        if slot >= MAX_TCP_CONNS {
+            return;
+        }
 
         match ftype {
             F_TCONN => {
@@ -1288,11 +1328,16 @@ impl Channel for TcpDestChannel {
                 }
             }
             F_TDATA => {
-                if data.is_empty() { return; }
-                enum TDataAction { Close, Update, Skip }
+                if data.is_empty() {
+                    return;
+                }
+                enum TDataAction {
+                    Close,
+                    Update,
+                    Skip,
+                }
                 let action = if let Some(conn) = self.conns[slot].as_mut() {
-                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD)
-                        .saturating_sub(conn.txbuf.len());
+                    let avail = (CONN_HIGH_WATER + MAX_PAYLOAD).saturating_sub(conn.txbuf.len());
                     if conn.txbuf.len() > CONN_HIGH_WATER || data.len() > avail {
                         TDataAction::Close
                     } else {
@@ -1305,13 +1350,14 @@ impl Channel for TcpDestChannel {
                 match action {
                     TDataAction::Close => {
                         tracing::warn!(
-                            ch_id = self.ch_id, slot,
+                            ch_id = self.ch_id,
+                            slot,
                             "TCP dst: slot exceeded high-water, closing",
                         );
                         self.close_slot(slot, true, txq, reg);
                     }
                     TDataAction::Update => self.update_conn_interest(slot, reg),
-                    TDataAction::Skip   => {}
+                    TDataAction::Skip => {}
                 }
             }
             F_TCLOSE => {
@@ -1322,7 +1368,9 @@ impl Channel for TcpDestChannel {
                         conn.close_pending = true;
                         false
                     }
-                } else { return; };
+                } else {
+                    return;
+                };
                 if should_close {
                     self.close_slot(slot, false, txq, reg);
                 } else {
@@ -1350,15 +1398,17 @@ impl Channel for TcpDestChannel {
     }
 
     fn tick(&mut self, _now: Instant, _txq: &mut TxQueue, _reg: &Registry) {}
-    fn next_deadline(&self) -> Option<Instant> { None }
+    fn next_deadline(&self) -> Option<Instant> {
+        None
+    }
 
     fn handle_event(
         &mut self,
-        token:    Token,
+        token: Token,
         readable: bool,
         writable: bool,
-        txq:      &mut TxQueue,
-        reg:      &Registry,
+        txq: &mut TxQueue,
+        reg: &Registry,
     ) {
         self.tcp_event(token, readable, writable, txq, reg);
     }
@@ -1371,13 +1421,17 @@ impl Channel for TcpDestChannel {
     }
 
     fn pause_source_reads(&mut self, reg: &Registry) {
-        if self.bp_paused { return; }
+        if self.bp_paused {
+            return;
+        }
         self.bp_paused = true;
         self.update_conn_interest_all(reg);
     }
 
     fn resume_source_reads(&mut self, reg: &Registry) {
-        if !self.bp_paused { return; }
+        if !self.bp_paused {
+            return;
+        }
         self.bp_paused = false;
         self.update_conn_interest_all(reg);
     }
@@ -1389,19 +1443,21 @@ impl Channel for TcpDestChannel {
 /// reads are paused when backpressured or `close_pending`; writes are
 /// requested when `txbuf` is non-empty or an async connect is in progress.
 fn dst_conn_update_interest(
-    ch_id:     u8,
+    ch_id: u8,
     bp_paused: bool,
-    slot:      usize,
-    conn:      &mut TcpConn,
-    reg:       &Registry,
+    slot: usize,
+    conn: &mut TcpConn,
+    reg: &Registry,
 ) {
-    if !conn.in_sel { return; }
+    if !conn.in_sel {
+        return;
+    }
     let want_write = !conn.txbuf.is_empty() || conn.connecting;
-    let want_read  = !(bp_paused || conn.close_pending);
+    let want_read = !(bp_paused || conn.close_pending);
     let interest = match (want_read, want_write) {
-        (true,  true)  => Interest::READABLE | Interest::WRITABLE,
-        (true,  false) => Interest::READABLE,
-        (false, true)  => Interest::WRITABLE,
+        (true, true) => Interest::READABLE | Interest::WRITABLE,
+        (true, false) => Interest::READABLE,
+        (false, true) => Interest::WRITABLE,
         (false, false) => return,
     };
     let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);

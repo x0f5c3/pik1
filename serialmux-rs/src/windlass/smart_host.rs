@@ -60,12 +60,12 @@ use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::sync::watch;
 use tokio_util::codec::FramedWrite;
 
+use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
-    PayloadTunnelCodec, PayloadTunnelFrame, CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG,
+    CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, PayloadTunnelCodec, PayloadTunnelFrame,
 };
 use crate::windlass::prepare_socket_path;
-use crate::windlass::McuSpec;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // anchor Config implementation
@@ -257,7 +257,11 @@ pub async fn run_smart_host(
                 }
             };
 
-            tracing::info!(ch_id, bytes = dictionary.len(), "windlass-bridge smart host: channel ready");
+            tracing::info!(
+                ch_id,
+                bytes = dictionary.len(),
+                "windlass-bridge smart host: channel ready"
+            );
 
             loop {
                 match listener.accept().await {
@@ -312,7 +316,10 @@ pub async fn run_smart_host(
                     // If no active Klipper connection, the frame is dropped —
                     // Klipper will reconnect and re-request the missing state.
                 } else {
-                    tracing::warn!(ch_id = pf.ch_id, "windlass-bridge smart host: received frame for unknown channel");
+                    tracing::warn!(
+                        ch_id = pf.ch_id,
+                        "windlass-bridge smart host: received frame for unknown channel"
+                    );
                 }
             }
             Some(Err(e)) => {
@@ -369,21 +376,30 @@ async fn gather_dictionary(
             CTRL_DICT_DONE => {
                 let dict = dicts.remove(&mcu_ch_id).unwrap_or_default();
                 if dict.is_empty() {
-                    tracing::warn!(ch_id = mcu_ch_id,
-                        "windlass-bridge smart host: DICT_DONE received with no preceding DICT_FRAG frames");
+                    tracing::warn!(
+                        ch_id = mcu_ch_id,
+                        "windlass-bridge smart host: DICT_DONE received with no preceding DICT_FRAG frames"
+                    );
                 }
-                tracing::info!(ch_id = mcu_ch_id, bytes = dict.len(),
-                    "windlass-bridge smart host: dictionary ready");
+                tracing::info!(
+                    ch_id = mcu_ch_id,
+                    bytes = dict.len(),
+                    "windlass-bridge smart host: dictionary ready"
+                );
                 if let Some(tx) = watch_txs.get(&mcu_ch_id) {
                     let _ = tx.send(Some(Arc::new(dict)));
                 } else {
-                    tracing::warn!(ch_id = mcu_ch_id,
-                        "windlass-bridge smart host: DICT_DONE for unknown channel, ignoring");
+                    tracing::warn!(
+                        ch_id = mcu_ch_id,
+                        "windlass-bridge smart host: DICT_DONE for unknown channel, ignoring"
+                    );
                 }
             }
             other => {
-                tracing::warn!(ctrl_type = other,
-                    "windlass-bridge smart host: unknown control type, ignoring");
+                tracing::warn!(
+                    ctrl_type = other,
+                    "windlass-bridge smart host: unknown control type, ignoring"
+                );
             }
         }
     }
@@ -459,7 +475,11 @@ async fn handle_klipper_smart_connection(
             // Bytes from the Klipper socket.
             result = sock_read.read(&mut read_buf) => {
                 match result {
-                    Ok(0) | Err(_) => break 'relay,
+                    Ok(0) => break 'relay,
+                    Err(e) => {
+                        tracing::info!(ch_id, err = %e, "windlass-bridge smart host: Klipper socket read error");
+                        break 'relay;
+                    }
                     Ok(n) => {
                         input_buf.extend_from_slice(&read_buf[..n]);
                         {

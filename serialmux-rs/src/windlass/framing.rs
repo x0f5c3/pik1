@@ -128,7 +128,9 @@ impl Encoder<TunnelFrame> for TunnelCodec {
 pub const CTRL_CH: u8 = 0xFF;
 /// Control payload type: dictionary fragment bytes.
 pub const CTRL_DICT_FRAG: u8 = 0x01;
-/// Control payload type: dictionary transfer complete (no additional bytes).
+/// Control payload type: dictionary transfer complete for one MCU channel.
+///
+/// Payload layout: `[ CTRL_DICT_DONE ][ ch_id ]`.
 pub const CTRL_DICT_DONE: u8 = 0x02;
 /// Maximum dictionary bytes per [`CTRL_DICT_FRAG`] payload.
 ///
@@ -174,8 +176,10 @@ pub struct PayloadTunnelFrame {
 /// sessions are terminated at each end of the CDC link, so the link only
 /// carries clean application payloads.
 ///
-/// A zero-length payload is valid (used e.g. for keep-alive or as a DICT_DONE
-/// control message where the type byte alone constitutes the payload).
+/// A zero-length payload is valid for tunnel messages that genuinely carry no
+/// data (for example a future keep-alive). Current dictionary control messages
+/// are non-empty: `DICT_FRAG` is `[type][ch_id][dict_bytes…]` and `DICT_DONE`
+/// is `[type][ch_id]`.
 #[derive(Default)]
 pub struct PayloadTunnelCodec;
 
@@ -209,10 +213,7 @@ impl Encoder<PayloadTunnelFrame> for PayloadTunnelCodec {
         if len > 255 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                format!(
-                    "smart-proxy payload {} bytes exceeds 255-byte limit",
-                    len
-                ),
+                format!("smart-proxy payload {} bytes exceeds 255-byte limit", len),
             ));
         }
         dst.reserve(2 + len);
@@ -364,11 +365,7 @@ mod tests {
     fn framer_skips_idle_syncs() {
         let mut src = BytesMut::new();
         // Three idle syncs, then a real frame.
-        src.extend_from_slice(&[
-            MESSAGE_VALUE_SYNC,
-            MESSAGE_VALUE_SYNC,
-            MESSAGE_VALUE_SYNC,
-        ]);
+        src.extend_from_slice(&[MESSAGE_VALUE_SYNC, MESSAGE_VALUE_SYNC, MESSAGE_VALUE_SYNC]);
         let frame = make_frame(&[0xAA]);
         src.extend_from_slice(&frame);
 
@@ -467,7 +464,10 @@ mod tests {
     #[test]
     fn payload_tunnel_roundtrip() {
         let payload = bytes::Bytes::from_static(&[0x01, 0x00, 0x28]);
-        let pf = PayloadTunnelFrame { ch_id: 5, payload: payload.clone() };
+        let pf = PayloadTunnelFrame {
+            ch_id: 5,
+            payload: payload.clone(),
+        };
 
         let mut buf = BytesMut::new();
         let mut enc = PayloadTunnelCodec;
@@ -514,7 +514,7 @@ mod tests {
     fn payload_tunnel_returns_none_when_payload_incomplete() {
         let mut buf = BytesMut::new();
         buf.put_u8(0x01); // ch_id
-        buf.put_u8(10);   // claims 10 bytes
+        buf.put_u8(10); // claims 10 bytes
         buf.extend_from_slice(&[0xAA; 5]); // only 5 bytes present
         assert!(PayloadTunnelCodec.decode(&mut buf).unwrap().is_none());
     }

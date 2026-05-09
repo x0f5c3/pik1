@@ -20,13 +20,13 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{split, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, split};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{KlipperFramer, TunnelCodec, TunnelFrame};
-use crate::windlass::McuSpec;
 
 /// Run the exporter event loop.
 ///
@@ -135,7 +135,10 @@ pub async fn run_exporter(
                 if let Some(tx) = uart_write_txs.get(&tf.ch_id) {
                     let _ = tx.send(tf.frame);
                 } else {
-                    tracing::warn!(ch_id = tf.ch_id, "windlass-bridge exporter: received frame for unknown channel");
+                    tracing::warn!(
+                        ch_id = tf.ch_id,
+                        "windlass-bridge exporter: received frame for unknown channel"
+                    );
                 }
             }
             Some(Err(e)) => {

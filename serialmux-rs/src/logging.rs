@@ -23,7 +23,7 @@
 use std::path::PathBuf;
 
 use tracing_subscriber::prelude::*;
-use tracing_subscriber::{fmt, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt};
 
 /// Initialise the global tracing subscriber.
 ///
@@ -53,7 +53,12 @@ pub fn init(program: &'static str) {
         // Leak the guard so its background flush thread lives until process
         // exit.  Dropping it early would stop the background writer.
         std::mem::forget(guard);
-        Some(fmt::layer().json().with_target(true).with_writer(non_blocking))
+        Some(
+            fmt::layer()
+                .json()
+                .with_target(true)
+                .with_writer(non_blocking),
+        )
     } else {
         None
     };

@@ -1,7 +1,7 @@
 [package]
 name = "serialmux"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Klipper serial + TCP multiplexer over a USB CDC gadget link (Rust port)"
 
 [[bin]]
@@ -61,6 +61,7 @@ futures    = { version = "0.3", optional = true }
 tokio      = { version = "1", features = ["full"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }
 bytes      = { version = "1", optional = true }
+clap = { version = "4.6.1", features = ["derive"]}
 
 [profile.release]
 opt-level   = 3

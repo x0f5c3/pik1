@@ -40,15 +40,15 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use tokio::io::{split, AsyncWriteExt};
+use tokio::io::{AsyncWriteExt, split};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
+use crate::windlass::McuSpec;
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{KlipperFramer, TunnelCodec, TunnelFrame};
 use crate::windlass::prepare_socket_path;
-use crate::windlass::McuSpec;
 
 /// Run the host event loop.
 ///
@@ -145,7 +145,10 @@ pub async fn run_host(
                     // If no Klipper client is connected, the frame is silently
                     // dropped — the MCU will retransmit if it needs an ACK.
                 } else {
-                    tracing::warn!(ch_id, "windlass-bridge host: received frame for unknown channel");
+                    tracing::warn!(
+                        ch_id,
+                        "windlass-bridge host: received frame for unknown channel"
+                    );
                 }
             }
             Some(Err(e)) => {

@@ -38,7 +38,7 @@ impl AsyncSerial {
     unsafe fn from_raw_fd(fd: RawFd) -> io::Result<Self> {
         // SAFETY: We take ownership; std::fs::File::from_raw_fd is unsafe for
         // the same reason — the caller guarantees the fd is valid and owned.
-        let file = std::fs::File::from_raw_fd(fd);
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
         Ok(AsyncSerial(AsyncFd::new(file)?))
     }
 }
@@ -57,6 +57,14 @@ impl AsyncRead for AsyncSerial {
             };
             let unfilled = buf.initialize_unfilled();
             match guard.try_io(|inner| inner.get_ref().read(unfilled)) {
+                Ok(Ok(0)) => {
+                    // With VMIN=0/VTIME=0 the kernel may report readiness but a
+                    // non-blocking serial read can still return 0 to mean "no
+                    // data available yet", not EOF. Clear the readiness state
+                    // and poll again instead of signaling stream termination.
+                    guard.clear_ready();
+                    continue;
+                }
                 Ok(Ok(n)) => {
                     buf.advance(n);
                     return Poll::Ready(Ok(()));
@@ -113,7 +121,10 @@ pub fn open_serial(device: &str, baud: u32) -> io::Result<AsyncSerial> {
     use libc::{O_NOCTTY, O_NONBLOCK, O_RDWR};
 
     let path = std::ffi::CString::new(device).map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidInput, "invalid device path (contains NUL)")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid device path (contains NUL)",
+        )
     })?;
 
     // SAFETY: `path` is a valid NUL-terminated C string.  The flags are
@@ -139,8 +150,8 @@ pub fn open_serial(device: &str, baud: u32) -> io::Result<AsyncSerial> {
 
 fn apply_termios(fd: RawFd, baud: u32) -> io::Result<()> {
     use nix::sys::termios::{
-        cfsetspeed, tcgetattr, tcsetattr, ControlFlags, InputFlags, LocalFlags, OutputFlags,
-        SetArg, SpecialCharacterIndices as SCI,
+        ControlFlags, InputFlags, LocalFlags, OutputFlags, SetArg, SpecialCharacterIndices as SCI,
+        cfsetspeed, tcgetattr, tcsetattr,
     };
 
     // SAFETY: `fd` is a valid open terminal file descriptor.

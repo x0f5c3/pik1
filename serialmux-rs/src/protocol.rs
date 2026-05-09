@@ -8,34 +8,34 @@
 //! This module mirrors the C `serialmux.h` / `serialmux.c` implementation
 //! (CRC polynomial, constants, parser behaviour, ring-buffer TX queue).
 
-pub const HDR_SIZE:    usize = 6;  // magic(2) + type(1) + channel(1) + length(2 LE)
-pub const CRC_SIZE:    usize = 4;
+pub const HDR_SIZE: usize = 6; // magic(2) + type(1) + channel(1) + length(2 LE)
+pub const CRC_SIZE: usize = 4;
 /// Maximum payload bytes in a single frame.
 pub const MAX_PAYLOAD: usize = 16 * 1024;
 /// Total size of the largest possible frame.
-pub const MAX_FRAME:   usize = HDR_SIZE + MAX_PAYLOAD + CRC_SIZE;
+pub const MAX_FRAME: usize = HDR_SIZE + MAX_PAYLOAD + CRC_SIZE;
 
 // ── Frame type constants (must match C serialmux.h) ─────────────────────────
 /// Raw MCU serial data (exporter → host or host → MCU).
-pub const F_DATA:   u8 = 0x01;
+pub const F_DATA: u8 = 0x01;
 /// MCU is resetting; host should close the PTY.
-pub const F_FLUSH:  u8 = 0x02;
+pub const F_FLUSH: u8 = 0x02;
 /// MCU is ready; host should open the PTY.
-pub const F_READY:  u8 = 0x03;
+pub const F_READY: u8 = 0x03;
 /// Link handshake initiation.
-pub const F_HELLO:  u8 = 0x05;
+pub const F_HELLO: u8 = 0x05;
 /// Link handshake acknowledgement.
-pub const F_ACK:    u8 = 0x06;
+pub const F_ACK: u8 = 0x06;
 /// TCP tunnel: new connection notification.
-pub const F_TCONN:  u8 = 0x10;
+pub const F_TCONN: u8 = 0x10;
 /// TCP tunnel: payload bytes.
-pub const F_TDATA:  u8 = 0x11;
+pub const F_TDATA: u8 = 0x11;
 /// TCP tunnel: connection closed.
 pub const F_TCLOSE: u8 = 0x12;
 /// Keepalive probe.
-pub const F_PING:   u8 = 0x20;
+pub const F_PING: u8 = 0x20;
 /// Keepalive reply.
-pub const F_PONG:   u8 = 0x21;
+pub const F_PONG: u8 = 0x21;
 
 /// Klipper firmware sync byte.  Seeing `0x7E` after silence means the MCU
 /// has booted and Klipper is running.
@@ -45,7 +45,7 @@ pub const KLIPPER_SYNC: u8 = 0x7E;
 /// Pause all channel reads when the TX queue exceeds this many bytes.
 pub const LINK_HIGH_WATER: usize = 512 * 1024;
 /// Resume channel reads when the TX queue drains below this many bytes.
-pub const LINK_LOW_WATER:  usize = 256 * 1024;
+pub const LINK_LOW_WATER: usize = 256 * 1024;
 /// TX ring-buffer capacity: high-water + one max frame + guard margin.
 pub const LINK_TXBUF_SIZE: usize = LINK_HIGH_WATER + MAX_FRAME + 64;
 
@@ -95,7 +95,9 @@ pub struct FrameParser {
 }
 
 impl Default for FrameParser {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FrameParser {
@@ -130,17 +132,19 @@ impl FrameParser {
         while pos < data.len() {
             // Fill: copy only as much as fits in the fixed-size buffer.
             let space = PARSER_BUF_CAP - self.len;
-            let copy  = std::cmp::min(data.len() - pos, space);
+            let copy = std::cmp::min(data.len() - pos, space);
             if copy == 0 {
                 // Buffer full with no progress.  This should not happen under
                 // normal backpressure, but guard to avoid an infinite loop.
                 // Log so operators can diagnose backpressure failures.
-                tracing::warn!("FrameParser: buffer full, dropping remaining input (backpressure missed)");
+                tracing::warn!(
+                    "FrameParser: buffer full, dropping remaining input (backpressure missed)"
+                );
                 break;
             }
             self.buf[self.len..self.len + copy].copy_from_slice(&data[pos..pos + copy]);
             self.len += copy;
-            pos      += copy;
+            pos += copy;
 
             // Drain all complete frames from the buffer before the next fill.
             self.drain_frames(&mut cb);
@@ -153,13 +157,13 @@ impl FrameParser {
         F: FnMut(u8, u8, &[u8]),
     {
         loop {
-            if self.len < 2 { break; }
+            if self.len < 2 {
+                break;
+            }
 
             // Search for magic 0xAA 0x55.
             let mut i = 0usize;
-            while i + 1 < self.len
-                && !(self.buf[i] == 0xAA && self.buf[i + 1] == 0x55)
-            {
+            while i + 1 < self.len && !(self.buf[i] == 0xAA && self.buf[i + 1] == 0x55) {
                 i += 1;
             }
 
@@ -177,12 +181,14 @@ impl FrameParser {
                 self.len -= i;
             }
 
-            if self.len < HDR_SIZE { break; }
+            if self.len < HDR_SIZE {
+                break;
+            }
 
             // Decode header: magic(2) + type(1) + channel(1) + length(2 LE).
-            let ftype   = self.buf[2];
+            let ftype = self.buf[2];
             let channel = self.buf[3];
-            let length  = (self.buf[4] as usize) | ((self.buf[5] as usize) << 8);
+            let length = (self.buf[4] as usize) | ((self.buf[5] as usize) << 8);
 
             if length > MAX_PAYLOAD {
                 // Bad length field — skip the magic pair and rescan.
@@ -192,7 +198,9 @@ impl FrameParser {
             }
 
             let total = HDR_SIZE + length + CRC_SIZE;
-            if self.len < total { break; }
+            if self.len < total {
+                break;
+            }
 
             // Verify CRC32.
             let crc_rx = u32::from_le_bytes(
@@ -231,7 +239,7 @@ impl FrameParser {
 /// arithmetic, same `txq_push` / `txq_drain` semantics).
 pub struct TxQueue {
     /// Fixed-size backing store.
-    buf:  Box<[u8]>,
+    buf: Box<[u8]>,
     /// Read position (bytes available from `head` to `tail`).
     head: usize,
     /// Write position.
@@ -239,14 +247,16 @@ pub struct TxQueue {
 }
 
 impl Default for TxQueue {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TxQueue {
     /// Allocate a new ring buffer of capacity [`LINK_TXBUF_SIZE`].
     pub fn new() -> Self {
         TxQueue {
-            buf:  vec![0u8; LINK_TXBUF_SIZE].into_boxed_slice(),
+            buf: vec![0u8; LINK_TXBUF_SIZE].into_boxed_slice(),
             head: 0,
             tail: 0,
         }
@@ -277,7 +287,9 @@ impl TxQueue {
     /// message is emitted — matching the C `txq_push` overflow behaviour.
     pub fn enqueue(&mut self, data: &[u8]) {
         let n = data.len();
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
         if n > LINK_TXBUF_SIZE - 1 - self.used() {
             tracing::warn!("TxQueue: overflow — dropping frame (backpressure missed)");
             return;
@@ -298,23 +310,24 @@ impl TxQueue {
     /// remain (including `EAGAIN` / `EWOULDBLOCK`), or `Err(_)` on a real
     /// write error.
     pub fn drain_to_fd(&mut self, fd: libc::c_int) -> std::io::Result<bool> {
-        if self.is_empty() { return Ok(true); }
+        if self.is_empty() {
+            return Ok(true);
+        }
 
         // Write the contiguous segment from `head`.  If the data wraps around,
         // only the first segment is written; the caller loops back on the next
         // writable event.
         let (head, tail) = (self.head, self.tail);
-        let avail = if tail >= head { tail - head } else { LINK_TXBUF_SIZE - head };
+        let avail = if tail >= head {
+            tail - head
+        } else {
+            LINK_TXBUF_SIZE - head
+        };
 
         // SAFETY: `fd` is a valid open non-blocking file descriptor; the slice
         // `buf[head..head+avail]` lies within the allocated buffer.
-        let written = unsafe {
-            libc::write(
-                fd,
-                self.buf[head..].as_ptr() as *const libc::c_void,
-                avail,
-            )
-        };
+        let written =
+            unsafe { libc::write(fd, self.buf[head..].as_ptr() as *const libc::c_void, avail) };
         if written < 0 {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error()
