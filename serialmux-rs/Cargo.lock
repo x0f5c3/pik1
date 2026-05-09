@@ -11,7 +11,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 [[package]]
 name = "anchor"
 version = "0.1.0"
-source = "git+https://github.com/x0f5c3/anchor#a107ff11640c43e0e8ce140f8b8454ce682f7f40"
+source = "git+https://github.com/x0f5c3/anchor#e0770e216152b304ddf62c90dd86cd9c3d2025d1"
 dependencies = [
  "anchor_macro",
 ]
@@ -19,7 +19,7 @@ dependencies = [
 [[package]]
 name = "anchor_codegen"
 version = "0.1.0"
-source = "git+https://github.com/x0f5c3/anchor#a107ff11640c43e0e8ce140f8b8454ce682f7f40"
+source = "git+https://github.com/x0f5c3/anchor#e0770e216152b304ddf62c90dd86cd9c3d2025d1"
 dependencies = [
  "anyhow",
  "flate2",
@@ -35,7 +35,7 @@ dependencies = [
 [[package]]
 name = "anchor_macro"
 version = "0.1.0"
-source = "git+https://github.com/x0f5c3/anchor#a107ff11640c43e0e8ce140f8b8454ce682f7f40"
+source = "git+https://github.com/x0f5c3/anchor#e0770e216152b304ddf62c90dd86cd9c3d2025d1"
 dependencies = [
  "anchor_codegen",
  "proc-macro-error",
@@ -592,7 +592,7 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 [[package]]
 name = "windlass"
 version = "0.1.0"
-source = "git+https://github.com/x0f5c3/windlass#c3b08ead5f8086212878ee8f08ada9025636b0dc"
+source = "git+https://github.com/x0f5c3/windlass#0b4e956f2040080603873b929cb0508c2b6212e0"
 dependencies = [
  "flate2",
  "futures",

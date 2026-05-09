@@ -21,8 +21,9 @@
 //!
 //! # `identify` handling
 //!
-//! When Klipper sends `identify` (cmd=1), `ProxyConfig::dispatch` intercepts
-//! it, looks up the correct 40-byte chunk of the real MCU dictionary, builds
+//! When Klipper sends `identify` (cmd=1), `ProxyConfig::dispatch_raw` routes it
+//! into `dispatch`, which looks up the correct 40-byte chunk of the real MCU
+//! dictionary, builds
 //! an `identify_response` payload, and pushes it into `pending_responses`.
 //! After `transport.receive` returns the relay loop drains the queue via
 //! `transport.encode_frame`.  All other commands are forwarded to the
@@ -112,43 +113,53 @@ impl Config for ProxyConfig {
     type TransportOutput = ChannelOutput;
     type Context<'c> = ProxyContext<'c>;
 
+    fn dispatch_raw<'c>(frame: &mut &[u8], ctx: &mut ProxyContext<'c>) -> Result<(), ReadError> {
+        let mut probe = *frame;
+        let cmd = <u16 as Readable>::read(&mut probe)?;
+        if cmd == CMD_IDENTIFY {
+            let cmd = <u16 as Readable>::read(frame)?;
+            return Self::dispatch(cmd, frame, ctx);
+        }
+
+        // Forward non-identify commands unchanged (including cmd VLQ).
+        let _ = ctx.to_exporter.send(frame.to_vec());
+        *frame = &[];
+        Ok(())
+    }
+
     fn dispatch<'c>(
         cmd: u16,
         frame: &mut &[u8],
         ctx: &mut ProxyContext<'c>,
     ) -> Result<(), ReadError> {
-        if cmd == CMD_IDENTIFY {
-            // identify(offset: u32, count: u8)
-            let offset = <u32 as Readable>::read(frame)?;
-            let count = <u8 as Readable>::read(frame)? as usize;
-
-            let dict = ctx.dictionary;
-            let start = offset as usize;
-            let end = (start + count).min(dict.len());
-            let chunk = if start <= dict.len() {
-                &dict[start..end]
-            } else {
-                &[]
-            };
-
-            // Build identify_response payload:
-            // [cmd=0 VLQ][offset VLQ][data_len VLQ][data bytes]
-            // Uses the root-level anchor::Writable re-export to write
-            // VLQ-encoded integers into a Vec<u8> OutputBuffer.
-            let mut resp = Vec::new();
-            (0u32).write(&mut resp); // cmd = 0 (identify_response)
-            offset.write(&mut resp); // offset
-            (chunk.len() as u32).write(&mut resp); // data_len
-            resp.extend_from_slice(chunk);
-            ctx.pending_responses.push(resp);
-        } else {
-            // Forward all other commands to the exporter.
-            let mut payload = Vec::new();
-            (cmd as u32).write(&mut payload);
-            payload.extend_from_slice(frame);
-            *frame = &[]; // mark frame as fully consumed
-            let _ = ctx.to_exporter.send(payload);
+        if cmd != CMD_IDENTIFY {
+            // Non-identify commands are handled in dispatch_raw.
+            return Ok(());
         }
+
+        // identify(offset: u32, count: u8)
+        let offset = <u32 as Readable>::read(frame)?;
+        let count = <u8 as Readable>::read(frame)? as usize;
+
+        let dict = ctx.dictionary;
+        let start = offset as usize;
+        let end = (start + count).min(dict.len());
+        let chunk = if start <= dict.len() {
+            &dict[start..end]
+        } else {
+            &[]
+        };
+
+        // Build identify_response payload:
+        // [cmd=0 VLQ][offset VLQ][data_len VLQ][data bytes]
+        // Uses the root-level anchor::Writable re-export to write
+        // VLQ-encoded integers into a Vec<u8> OutputBuffer.
+        let mut resp = Vec::new();
+        (0u32).write(&mut resp); // cmd = 0 (identify_response)
+        offset.write(&mut resp); // offset
+        (chunk.len() as u32).write(&mut resp); // data_len
+        resp.extend_from_slice(chunk);
+        ctx.pending_responses.push(resp);
         Ok(())
     }
 }

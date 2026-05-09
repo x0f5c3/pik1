@@ -18,10 +18,10 @@
 //! ```
 //!
 //! Smart proxy:
-//! - [`smart_exporter`] terminates the MCU UART transport and forwards decoded
-//!   payloads plus the raw compressed dictionary.
-//! - [`smart_host`] terminates Klipper's transport with `anchor` and answers
-//!   `identify` locally.
+//! - [`smart_exporter`] fetches the raw MCU dictionary via `windlass::McuConnection`,
+//!   then relays decoded payloads via `windlass::Transport`.
+//! - [`smart_host`] terminates Klipper's transport with `anchor`, handles
+//!   `identify` locally, and forwards other commands as raw payloads.
 //!
 //! ## Tunnel wire format
 //!
@@ -42,13 +42,10 @@
 //! Users who require TCP channel tunnelling (e.g. grumpyscreen → Moonraker)
 //! must continue using the `serialmux` binary.
 //!
-//! The remaining upstream follow-up items are tracked in `patches/`.
-
 pub mod async_serial;
 pub mod exporter;
 pub mod framing;
 pub mod host;
-pub mod mcu_transport;
 pub mod smart_exporter;
 pub mod smart_host;
 

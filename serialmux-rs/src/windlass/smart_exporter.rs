@@ -8,12 +8,13 @@
 //!
 //! # Startup sequence per channel
 //!
-//! 1. Open the UART and connect a [`windlass::Transport`].
-//! 2. Perform the `identify`/`identify_response` exchange to obtain the MCU's
-//!    compressed data dictionary.
-//! 3. Forward the dictionary to the host over the CDC control channel
+//! 1. Open the UART and connect a [`windlass::McuConnection`].
+//! 2. Read the raw compressed dictionary bytes from
+//!    [`windlass::McuConnection::raw_dictionary_bytes`].
+//! 3. Reopen the UART and connect a [`windlass::Transport`] for relay mode.
+//! 4. Forward the dictionary to the host over the CDC control channel
 //!    (`ch_id = 0xFF`) as `DICT_FRAG` frames followed by a `DICT_DONE` frame.
-//! 4. Enter the relay loop:
+//! 5. Enter the relay loop:
 //!    - MCU payload received → forward as `[ch_id][len][payload]` over CDC.
 //!    - Command payload received from CDC → send to MCU via `windlass::Transport`.
 //!
@@ -34,13 +35,12 @@ use futures::SinkExt;
 use tokio::io::split;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_util::codec::FramedWrite;
-use windlass::Transport;
+use windlass::{McuConnection, Transport};
 
 use crate::windlass::async_serial::open_serial;
 use crate::windlass::framing::{
     PayloadTunnelCodec, PayloadTunnelFrame, CTRL_CH, CTRL_DICT_DONE, CTRL_DICT_FRAG, DICT_FRAG_MAX,
 };
-use crate::windlass::mcu_transport::fetch_dictionary;
 use crate::windlass::McuSpec;
 
 /// Run the smart-proxy exporter event loop.
@@ -88,30 +88,43 @@ pub async fn run_smart_exporter(
             }
         };
 
-        let (transport, mut payload_rx) = Transport::connect(uart).await;
-
-        // Fetch the MCU dictionary before entering relay mode.
+        // Fetch the MCU dictionary with the high-level McuConnection API.
         eprintln!(
             "windlass-bridge smart exporter: ch{} fetching MCU dictionary…",
             ch_id
         );
-        let dictionary = match fetch_dictionary(&transport, &mut payload_rx).await {
-            Ok(d) => {
+        let dictionary = match McuConnection::connect(uart).await {
+            Ok(conn) => {
+                let dict = conn.raw_dictionary_bytes().to_vec();
+                conn.close().await;
                 eprintln!(
                     "windlass-bridge smart exporter: ch{} dictionary {} bytes",
                     ch_id,
-                    d.len()
+                    dict.len()
                 );
-                d
+                dict
             }
             Err(e) => {
                 eprintln!(
                     "windlass-bridge smart exporter: ch{} dictionary fetch failed: {}",
                     ch_id, e
                 );
-                return Err(e);
+                return Err(e.into());
             }
         };
+
+        // Reopen UART for low-level relay transport.
+        let uart = match open_serial(&ch.path, ch.baud) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "windlass-bridge smart exporter: ch{} cannot reopen {}: {}",
+                    ch_id, ch.path, e
+                );
+                return Err(e.into());
+            }
+        };
+        let (transport, mut payload_rx) = Transport::connect(uart).await;
 
         // Send the dictionary to the host over the control channel.
         send_dictionary(&usb_tx, &dictionary)?;
