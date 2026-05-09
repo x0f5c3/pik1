@@ -263,7 +263,7 @@ fn build_channels(
                 match TcpSourceChannel::new(*id, bind_addr, *port, poll.registry()) {
                     Ok(ch) => channels.push(Box::new(ch)),
                     Err(e) => {
-                        eprintln!("serialmux: failed to bind TCP {}:{}: {}", bind_addr, port, e);
+                        tracing::error!(bind_addr, port, err = %e, "serialmux: failed to bind TCP");
                         std::process::exit(1);
                     }
                 }
@@ -293,7 +293,7 @@ fn main() {
     }
 
     let mut poll = mio::Poll::new().unwrap_or_else(|e| {
-        eprintln!("serialmux: cannot create poll: {}", e);
+        tracing::error!(err = %e, "serialmux: cannot create poll");
         std::process::exit(1);
     });
 

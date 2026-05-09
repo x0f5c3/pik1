@@ -301,7 +301,7 @@ async fn main() {
     };
 
     if let Err(e) = result {
-        eprintln!("windlass-bridge: fatal: {}", e);
+        tracing::error!(err = %e, "windlass-bridge: fatal error");
         std::process::exit(1);
     }
 }
