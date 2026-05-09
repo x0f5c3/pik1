@@ -79,9 +79,9 @@ Pre-built binaries for K1 (`build/serialmux.mipsel`) and Pi
 release. If you want to build from source:
 
 ```bash
-make toolchain   # one-time: downloads musl.cc cross-compilers into .toolchain/
-make mipsel      # K1 binary  → build/serialmux.mipsel
-make aarch64     # Pi binary  → build/serialmux.aarch64
+task toolchain   # one-time: downloads musl.cc cross-compilers into .toolchain/
+task mipsel      # K1 binary  → build/serialmux.mipsel
+task aarch64     # Pi binary  → build/serialmux.aarch64
 ```
 
 ### Raspberry Pi side
@@ -124,7 +124,7 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
     From the repo directory on the Pi (pre-built binary included):
 
     ```bash
-    make install-pi
+    task install-pi
     ```
 
     This copies the binary and setup script to `/opt/pik1/`, installs and enables
@@ -166,7 +166,7 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
     From the repo directory on the K1 (pre-built binary included):
 
     ```bash
-    make install-k1
+    task install-k1
     ```
 
     This copies `build/serialmux.mipsel` to `/usr/data/pik1/serialmux`, installs
@@ -309,7 +309,7 @@ talking to `127.0.0.1:7125` as if Moonraker were local.
 
 1. #### Uninstall pik1 from K1
     ```sh
-    make uninstall-k1
+    task uninstall-k1
     ```
     This removes the init script and binary and restores all disabled services.
     Alternatively:
