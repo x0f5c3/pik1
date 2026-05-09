@@ -266,7 +266,7 @@ fn parse_channel_spec(mode: &str, spec: &str) -> Result<McuSpec, String> {
             baud,
         })
     } else {
-        if parts.len() < 3 || parts.len() > 4 {
+        if parts.len() != 3 {
             return Err(format!(
                 "host mcu spec {:?}: need mcu:<id>:<socket_path>",
                 spec

@@ -18,7 +18,7 @@ mod logging;
 mod protocol;
 mod serial;
 
-use channel::{McuChannel, PtyChannel, TcpDestChannel, TcpSourceChannel};
+use channel::{MAX_CHANNEL_ID, McuChannel, PtyChannel, TcpDestChannel, TcpSourceChannel};
 use clap::{Args as ClapArgs, Parser, Subcommand};
 use daemon::Daemon;
 use serial::wait_for_acm;
@@ -233,6 +233,12 @@ fn parse_channel_spec(mode: &str, spec: &str) -> Result<ChannelSpec, String> {
     let id = parts[1]
         .parse()
         .map_err(|_| format!("channel id in {:?} must be 0-255", spec))?;
+    if id > MAX_CHANNEL_ID {
+        return Err(format!(
+            "channel id {} in {:?} exceeds supported maximum {}",
+            id, spec, MAX_CHANNEL_ID
+        ));
+    }
 
     match (kind, mode) {
         ("mcu", "exporter") => {
@@ -302,8 +308,13 @@ fn parse_standard_baud(raw: &str, spec: &str, valid_bauds: &[u32]) -> Result<u32
 
 fn parse_tcp_port(raw: Option<&str>, spec: &str) -> Result<u16, String> {
     let raw = raw.ok_or_else(|| format!("tcp spec {:?}: need tcp:<id>:<addr>:<port>", spec))?;
-    raw.parse()
-        .map_err(|_| format!("port in {:?} must be 1-65535", spec))
+    let port: u16 = raw
+        .parse()
+        .map_err(|_| format!("port in {:?} must be 1-65535", spec))?;
+    if port == 0 {
+        return Err(format!("port in {:?} must be 1-65535", spec));
+    }
+    Ok(port)
 }
 
 fn validate_unique_channel_ids(channels: &[ChannelSpec]) {

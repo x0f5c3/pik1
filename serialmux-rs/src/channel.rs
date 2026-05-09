@@ -28,7 +28,7 @@ use crate::serial::{
 // Token layout
 // ─────────────────────────────────────────────────────────────────────────────
 // Token(0)               – link fd (managed by Daemon)
-// Token(1..=63)          – channel primary fd  (channel N → token N+1)
+// Token(1..=63)          – channel primary fd  (channel N → token N+1, N=0..62)
 // Token(TCP_BASE + N*MAX_TCP_CONNS + slot) – TCP connection slot for channel N
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,6 +37,8 @@ pub const TOKEN_LINK: Token = Token(0);
 
 /// Base token for TCP connection slots.
 const TCP_BASE: usize = 64;
+/// Highest channel id that can be represented by primary-fd tokens.
+pub const MAX_CHANNEL_ID: u8 = 62;
 
 /// Maximum concurrent TCP connections per channel.  Matches the C
 /// `MAX_TCP_CONNS` constant so connection IDs are interchangeable on the wire.
@@ -44,6 +46,12 @@ const MAX_TCP_CONNS: usize = 256;
 
 /// Compute the mio token for a channel's primary fd (UART / PTY / listen socket).
 pub fn primary_token(ch_id: u8) -> Token {
+    assert!(
+        ch_id <= MAX_CHANNEL_ID,
+        "channel id {} exceeds supported maximum {}",
+        ch_id,
+        MAX_CHANNEL_ID
+    );
     Token(ch_id as usize + 1)
 }
 
@@ -61,7 +69,11 @@ pub fn channel_id_for_token(token: Token) -> Option<u8> {
         1..=63 => Some((token.0 - 1) as u8),
         t => {
             let id = (t - TCP_BASE) / MAX_TCP_CONNS;
-            if id <= 62 { Some(id as u8) } else { None }
+            if id <= MAX_CHANNEL_ID as usize {
+                Some(id as u8)
+            } else {
+                None
+            }
         }
     }
 }
