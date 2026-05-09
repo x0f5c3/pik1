@@ -46,7 +46,7 @@ const MAX_TCP_CONNS: usize = 256;
 
 /// Compute the mio token for a channel's primary fd (UART / PTY / listen socket).
 pub fn primary_token(ch_id: u8) -> Token {
-    assert!(
+    debug_assert!(
         ch_id <= MAX_CHANNEL_ID,
         "channel id {} exceeds supported maximum {}",
         ch_id,

@@ -63,12 +63,14 @@ const PARSER_BUF_CAP: usize = MAX_FRAME + 64;
 /// Layout: `[0xAA 0x55][ftype][channel][len_lo][len_hi][payload…][crc0..crc3]`
 pub fn build_frame(ftype: u8, channel: u8, payload: &[u8]) -> Vec<u8> {
     let length = payload.len();
-    assert!(
-        length <= MAX_PAYLOAD,
-        "frame payload length {} exceeds protocol maximum {}",
-        length,
-        MAX_PAYLOAD
-    );
+    if length > MAX_PAYLOAD {
+        tracing::error!(
+            length,
+            max = MAX_PAYLOAD,
+            "build_frame: refusing to build oversize frame payload"
+        );
+        return Vec::new();
+    }
     // CRC32 with the standard reflected polynomial (zlib / ISO 3309), matching
     // the C `crc32_buf()` implementation (poly 0xEDB88320).
     let crc = crc32fast::hash(payload);
