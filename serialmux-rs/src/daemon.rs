@@ -223,7 +223,7 @@ impl Daemon {
                 // before we call `dispatch_frame` which needs `&mut self`.
                 let mut frames: Vec<(u8, u8, Vec<u8>)> = Vec::new();
                 self.parser.feed(&buf[..n], |ftype, channel, payload| {
-                    frames.push((ftype, channel, payload.to_vec()));
+                    frames.push((ftype, channel, payload));
                 });
                 for (ftype, channel, payload) in frames {
                     self.dispatch_frame(ftype, channel, &payload, poll);

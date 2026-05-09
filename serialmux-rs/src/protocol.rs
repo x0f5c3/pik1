@@ -124,9 +124,12 @@ impl FrameParser {
     /// drops on reads larger than 16 KiB.
     ///
     /// `cb(ftype, channel, payload)` is invoked for each valid frame.
+    ///
+    /// The payload is passed as an owned [`Vec<u8>`] to avoid extra copies in
+    /// hot call sites that need to queue parsed frames.
     pub fn feed<F>(&mut self, data: &[u8], mut cb: F)
     where
-        F: FnMut(u8, u8, &[u8]),
+        F: FnMut(u8, u8, Vec<u8>),
     {
         let mut pos = 0usize;
         while pos < data.len() {
@@ -154,7 +157,7 @@ impl FrameParser {
     /// Parse and dispatch all complete frames from the internal buffer.
     fn drain_frames<F>(&mut self, cb: &mut F)
     where
-        F: FnMut(u8, u8, &[u8]),
+        F: FnMut(u8, u8, Vec<u8>),
     {
         loop {
             if self.len < 2 {
@@ -219,7 +222,7 @@ impl FrameParser {
             let payload: Vec<u8> = self.buf[HDR_SIZE..HDR_SIZE + length].to_vec();
             self.buf.copy_within(total..self.len, 0);
             self.len -= total;
-            cb(ftype, channel, &payload);
+            cb(ftype, channel, payload);
         }
     }
 }

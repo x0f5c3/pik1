@@ -123,10 +123,10 @@ pub fn find_acm_by_usb_id(vid: &str, pid: &str) -> Option<String> {
     None
 }
 
-/// Block (synchronously) until a `ttyACM*` device matching `vid:pid` appears.
+/// Block (asynchronously) until a `ttyACM*` device matching `vid:pid` appears.
 ///
 /// Logs progress every 10 seconds.  Returns the device path.
-pub fn wait_for_acm(vid: &str, pid: &str) -> String {
+pub async fn wait_for_acm(vid: &str, pid: &str) -> String {
     let mut last_log = Instant::now() - Duration::from_secs(11);
     loop {
         if let Some(dev) = find_acm_by_usb_id(vid, pid) {
@@ -141,19 +141,19 @@ pub fn wait_for_acm(vid: &str, pid: &str) -> String {
             );
             last_log = now;
         }
-        std::thread::sleep(Duration::from_millis(500));
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 }
 
 /// Resolve a link device: either a direct path or a USB-discovered path.
 ///
-/// Blocks until the device appears if USB discovery is requested.
-pub fn resolve_link_device(link_dev: Option<&str>, usb_id: Option<(&str, &str)>) -> String {
+/// Waits until the device appears if USB discovery is requested.
+pub async fn resolve_link_device(link_dev: Option<&str>, usb_id: Option<(&str, &str)>) -> String {
     if let Some(dev) = link_dev {
         return dev.to_string();
     }
     if let Some((vid, pid)) = usb_id {
-        return wait_for_acm(vid, pid);
+        return wait_for_acm(vid, pid).await;
     }
     unreachable!("caller must supply link_dev or usb_id")
 }

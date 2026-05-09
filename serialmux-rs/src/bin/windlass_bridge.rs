@@ -318,7 +318,8 @@ async fn main() {
     let link_device = resolve_link_device(
         args.link_dev.as_deref(),
         args.usb_id.as_ref().map(|(v, p)| (v.as_str(), p.as_str())),
-    );
+    )
+    .await;
 
     let result = if args.mode == "exporter" {
         if args.smart {

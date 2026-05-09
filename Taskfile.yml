@@ -77,7 +77,7 @@ tasks:
     desc: Download the musl.cc MIPSEL cross-toolchain into .toolchain
     cmds:
       - |
-        set -eu
+        set -euo pipefail
         TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
         MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
         MIPSEL_TRIPLE="${MIPSEL_TRIPLE:-mipsel-linux-musl}"
@@ -90,7 +90,7 @@ tasks:
     desc: Download the musl.cc AArch64 cross-toolchain into .toolchain
     cmds:
       - |
-        set -eu
+        set -euo pipefail
         TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
         MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
         AARCH64_TRIPLE="${AARCH64_TRIPLE:-aarch64-linux-musl}"
@@ -103,7 +103,7 @@ tasks:
     desc: Download the musl.cc ARMv7 cross-toolchain into .toolchain
     cmds:
       - |
-        set -eu
+        set -euo pipefail
         TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
         MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
         ARMV7_TRIPLE="${ARMV7_TRIPLE:-arm-linux-musleabihf}"
