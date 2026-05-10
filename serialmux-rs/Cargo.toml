@@ -54,9 +54,9 @@ tracing-journald   = { version = "0.3", optional = true }
 
 # --- windlass feature dependencies (optional) --------------------------------
 # windlass: host-side Klipper transport, used by smart-proxy exporter helpers.
-windlass   = { git = "https://github.com/x0f5c3/windlass", optional = true }
+windlass   = { git = "https://github.com/x0f5c3/windlass", rev = "0b4e956f2040080603873b929cb0508c2b6212e0", optional = true }
 # anchor: MCU-side Klipper protocol, used by the smart-proxy host.
-anchor     = { git = "https://github.com/x0f5c3/anchor", features = ["std"], optional = true }
+anchor     = { git = "https://github.com/x0f5c3/anchor", rev = "e0770e216152b304ddf62c90dd86cd9c3d2025d1", features = ["std"], optional = true }
 futures    = { version = "0.3", optional = true }
 tokio      = { version = "1", features = ["full"], optional = true }
 tokio-util = { version = "0.7", features = ["codec"], optional = true }

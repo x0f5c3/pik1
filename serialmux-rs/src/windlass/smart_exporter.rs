@@ -249,8 +249,8 @@ fn send_dictionary(
             .map_err(|_| "USB writer task closed")?;
     }
     // Signal end of dictionary for this channel.
-    // Use a stack array and copy_from_slice to avoid a heap allocation for
-    // this 2-byte frame.
+    // Use a stack array + `Bytes::copy_from_slice` to avoid constructing a
+    // temporary Vec for this 2-byte frame payload.
     let done_payload: [u8; 2] = [CTRL_DICT_DONE, ch_id];
     usb_tx
         .send(PayloadTunnelFrame {

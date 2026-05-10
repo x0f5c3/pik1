@@ -352,3 +352,81 @@ impl TxQueue {
         Ok(self.is_empty())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_parser_resyncs_after_noise() {
+        let mut parser = FrameParser::new();
+        let frame = build_frame(F_DATA, 7, b"abc");
+        let mut got = Vec::new();
+
+        let mut input = vec![0x00, 0x11, 0xAA, 0x99];
+        input.extend_from_slice(&frame);
+        parser.feed(&input, |ftype, channel, payload| {
+            got.push((ftype, channel, payload));
+        });
+
+        assert_eq!(got, vec![(F_DATA, 7, b"abc".to_vec())]);
+    }
+
+    #[test]
+    fn frame_parser_rejects_bad_crc_then_parses_next_frame() {
+        let mut parser = FrameParser::new();
+        let mut bad = build_frame(F_DATA, 1, b"bad");
+        let n = bad.len();
+        bad[n - 1] ^= 0xFF;
+        let good = build_frame(F_DATA, 2, b"ok");
+        bad.extend_from_slice(&good);
+
+        let mut got = Vec::new();
+        parser.feed(&bad, |ftype, channel, payload| {
+            got.push((ftype, channel, payload));
+        });
+
+        assert_eq!(got, vec![(F_DATA, 2, b"ok".to_vec())]);
+    }
+
+    #[test]
+    fn frame_parser_rejects_oversized_length_and_recovers() {
+        let mut parser = FrameParser::new();
+        let mut malformed = vec![0xAA, 0x55, F_DATA, 9, 0x01, 0x80];
+        malformed.extend_from_slice(&build_frame(F_DATA, 3, b"ok"));
+
+        let mut got = Vec::new();
+        parser.feed(&malformed, |ftype, channel, payload| {
+            got.push((ftype, channel, payload));
+        });
+
+        assert_eq!(got, vec![(F_DATA, 3, b"ok".to_vec())]);
+    }
+
+    #[test]
+    fn tx_queue_wraps_on_enqueue() {
+        let mut q = TxQueue::new();
+        q.head = LINK_TXBUF_SIZE - 2;
+        q.tail = LINK_TXBUF_SIZE - 2;
+
+        q.enqueue(&[1, 2, 3, 4]);
+        assert_eq!(q.tail, 2);
+        assert_eq!(&q.buf[LINK_TXBUF_SIZE - 2..], &[1, 2]);
+        assert_eq!(&q.buf[..2], &[3, 4]);
+        assert_eq!(q.used(), 4);
+    }
+
+    #[test]
+    fn tx_queue_drops_overflow_enqueue() {
+        let mut q = TxQueue::new();
+        q.head = 100;
+        q.tail = 99; // queue is full (LINK_TXBUF_SIZE - 1 bytes used)
+        let used_before = q.used();
+
+        q.enqueue(&[1, 2]);
+
+        assert_eq!(q.used(), used_before);
+        assert_eq!(q.head, 100);
+        assert_eq!(q.tail, 99);
+    }
+}
