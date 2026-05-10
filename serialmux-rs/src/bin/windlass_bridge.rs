@@ -252,6 +252,13 @@ fn parse_channel_spec(mode: &str, spec: &str) -> Result<McuSpec, String> {
         .parse()
         .map_err(|_| format!("channel id in {:?} must be 0-255", spec))?;
 
+    if ch_id == 0xFF {
+        return Err(format!(
+            "channel id 255 in {:?} is reserved for the windlass smart-proxy control channel",
+            spec
+        ));
+    }
+
     if mode == "exporter" {
         if parts.len() != 4 {
             return Err(format!(
