@@ -79,9 +79,9 @@ Pre-built binaries for K1 (`build/serialmux.mipsel`) and Pi
 release. If you want to build from source:
 
 ```bash
-make toolchain   # one-time: downloads musl.cc cross-compilers into .toolchain/
-make mipsel      # K1 binary  → build/serialmux.mipsel
-make aarch64     # Pi binary  → build/serialmux.aarch64
+task toolchain   # one-time: downloads musl.cc cross-compilers into .toolchain/
+task mipsel      # K1 binary  → build/serialmux.mipsel
+task aarch64     # Pi binary  → build/serialmux.aarch64
 ```
 
 ### Raspberry Pi side
@@ -124,7 +124,7 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
     From the repo directory on the Pi (pre-built binary included):
 
     ```bash
-    make install-pi
+    task install-pi
     ```
 
     This copies the binary and setup script to `/opt/pik1/`, installs and enables
@@ -166,7 +166,7 @@ make aarch64     # Pi binary  → build/serialmux.aarch64
     From the repo directory on the K1 (pre-built binary included):
 
     ```bash
-    make install-k1
+    task install-k1
     ```
 
     This copies `build/serialmux.mipsel` to `/usr/data/pik1/serialmux`, installs
@@ -309,7 +309,7 @@ talking to `127.0.0.1:7125` as if Moonraker were local.
 
 1. #### Uninstall pik1 from K1
     ```sh
-    make uninstall-k1
+    task uninstall-k1
     ```
     This removes the init script and binary and restores all disabled services.
     Alternatively:
@@ -339,3 +339,223 @@ talking to `127.0.0.1:7125` as if Moonraker were local.
   for the K1 mainboard and a Raspberry Pi.
 - **KlipperScreen:** The Pi runs KlipperScreen by default. Connect an HDMI
   touchscreen to the Pi's HDMI port to use it, or uninstall it if not needed.
+
+---
+
+## CB1 / K1C adapter notes
+
+### BTT CB1 (and CM4-compatible adapters)
+
+The CB1 (and similar CM4-footprint modules) exposes its OTG/device-mode USB on
+the **USB-C** port labelled "OTG" on most carrier boards (e.g. Manta, SKR
+mini E3 v3 in OTG mode).
+
+1. Ensure the carrier board's USB-C port is wired to the CB1's OTG USB2
+   controller (check your carrier board's schematic — it must NOT be connected
+   to the host-mode USB-A hub).
+2. Enable the `dwc2` overlay in `/boot/BOOT/BoardEnv.txt` (Armbian/BTT image)
+   or via the standard `/boot/firmware/config.txt` mechanism, same as Pi 4:
+   ```
+   overlays=dwc2
+   ```
+   or for explicit peripheral mode:
+   ```
+   overlays=dwc2
+   param_dwc2_dr_mode=peripheral
+   ```
+3. `setup_pik1.sh` probes `ls /sys/class/udc/` to find the UDC name — this
+   will differ from the Pi 4's `fe980000.usb`.  Inspect the output and, if
+   needed, hard-code the UDC in `setup_pik1.sh`.
+4. Everything else (gadget, serialmux, service) is identical to the Pi 4 path.
+
+### K1C front USB → Pi routing
+
+On the **K1C**, the front-panel USB-A port is connected to the main SoC over a
+USB hub.  You can route it to the Pi by plugging a short USB-A to USB-C cable
+from the K1C front port into the Pi's OTG port.
+
+- The `S99pik1` init script uses `--usb 1d6b:0104` (default for the K1/K1C CDC
+  gadget composite device).  Update `USB_ID` in the script if your K1C firmware
+  uses a different VID:PID (check with `lsusb` on the Pi once connected).
+- The front USB port's hub controller may re-enumerate devices on reboot;
+  `serialmux` handles this automatically by re-scanning sysfs on reconnect.
+
+---
+
+## Using the Rust binary (`serialmux-rs`)
+
+A Rust port of the daemon is available in the `serialmux-rs/` directory.
+It exposes **exactly the same CLI** as `serialmux.py` and is a drop-in
+replacement — only the binary path changes in `S99pik1` / `pik1.service`.
+
+The Rust binary is useful when you need lower CPU overhead on constrained
+hardware (e.g. CB1 at 1.2 GHz), or want a single static binary with no Python
+runtime dependency.
+
+### Build
+
+Cross-compile for 32-bit ARMv7 (K1 / Manta CB1) or 64-bit AArch64 (Pi 4 /
+CB1 in 64-bit mode).  A native Rust toolchain on the target also works.
+
+```bash
+# Install Rust (once)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+
+# Native build (run on the target machine, or in a Pi 4 SSH session)
+cd serialmux-rs
+cargo build --release
+# Binary: target/release/serialmux
+
+# ARM cross-compile from x86-64 (e.g. on your laptop or CI)
+rustup target add armv7-unknown-linux-gnueabihf  # for K1 / CB1 ARMv7
+cargo build --release --target armv7-unknown-linux-gnueabihf
+# Binary: target/armv7-unknown-linux-gnueabihf/release/serialmux
+```
+
+> **CB1 / Pi 4 AArch64:**
+> ```bash
+> rustup target add aarch64-unknown-linux-gnu
+> cargo build --release --target aarch64-unknown-linux-gnu
+> ```
+
+### Install
+
+Copy the binary to `/opt/pik1/` on both machines:
+
+```bash
+sudo cp target/release/serialmux /opt/pik1/serialmux
+sudo chmod +x /opt/pik1/serialmux
+```
+
+### Update `S99pik1` (K1 exporter)
+
+Change the interpreter line:
+
+```sh
+# Before (Python):
+/usr/bin/python3 /usr/data/pik1/serialmux.py exporter ...
+
+# After (Rust binary):
+/usr/data/pik1/serialmux exporter ...
+```
+
+### Update `pik1.service` (Pi host)
+
+```ini
+# Before:
+ExecStart=/usr/bin/python3 /opt/pik1/serialmux.py host /dev/ttyGS0 ...
+
+# After:
+ExecStart=/opt/pik1/serialmux host /dev/ttyGS0 ...
+```
+
+Then reload systemd:
+```bash
+sudo systemctl daemon-reload && sudo systemctl restart pik1
+```
+
+---
+
+## USB back-power — hardware fix
+
+> **This is a hardware-only issue.  There is no software workaround that is
+> reliable on all boards.**
+
+When the Pi's OTG port supplies 5 V VBUS it can back-power the K1 through the
+cable.  This causes unpredictable resets, brown-outs, and boot failures on both
+sides.
+
+**Fix: remove VBUS (5 V) from the cable — keep GND and the two data lines.**
+
+| Method | Notes |
+|---|---|
+| Kapton tape over the VBUS pin | Quick; reversible; can slip |
+| Snip the red wire inside the cable | Permanent; best for dedicated cables |
+| USB power-blocker dongle | Easiest off-the-shelf option |
+| [Printed VBUS pin jig](https://www.thingiverse.com/thing:3044586/files) | Precise; reusable; recommended |
+| JST wiring harness to mainboard header, VBUS omitted | Cleanest permanent solution |
+
+GND **must** remain connected for the data link to work.
+
+---
+
+## Windlass bridge (native Klipper transport)
+
+> **opt-in, not compatible with `serialmux`** — both the K1 exporter and the
+> Pi/CB1 host must run `windlass-bridge` at the same time.
+
+`windlass-bridge` is an alternative to `serialmux` that relays raw Klipper
+transport frames directly over the USB CDC ACM link instead of wrapping them
+in the serialmux envelope.
+
+### Comparison
+
+| Property | serialmux | windlass-bridge |
+|---|---|---|
+| Framing overhead per MCU frame | ~10 bytes (serialmux envelope) | 1 byte (channel index only) |
+| Host PTY required | Yes | No (Unix domain socket) |
+| TCP channel tunnelling | Yes | No |
+| I/O model | `mio` single-thread | `tokio` async tasks |
+| Klipper config change required | No | Yes (socket path) |
+| Compatible with C/Python daemon | Yes | No |
+
+### Tunnel wire format
+
+```
+[ ch_id : u8 ][ raw Klipper frame : 5..=64 bytes ]
+```
+
+The raw Klipper frame is self-delimiting (length byte at `[0]`, sync byte
+`0x7E` at `[end]`), so the tunnel adds only **one byte** of overhead per frame.
+
+### Build
+
+```bash
+cd serialmux-rs
+cargo build --release --features windlass
+# Produces: target/release/windlass-bridge
+```
+
+### Deploy
+
+**K1 / K1C SoC (exporter)**  
+Copy `windlass-bridge` to `/usr/data/pik1/windlass-bridge`, then edit
+`/etc/init.d/S99pik1` — follow the commented-out instructions in that file to
+switch from the `serialmux.py` block to the `windlass-bridge` block.
+
+**Pi / BTT CB1 (host)**  
+Copy `windlass-bridge` to `/opt/pik1/windlass-bridge`, then edit
+`/etc/systemd/system/pik1.service` — follow the commented-out instructions to
+switch `ExecStart` from `serialmux.py` to `windlass-bridge host`.
+
+### Klipper config
+
+Replace the PTY device path with the Unix socket path in `printer.cfg`:
+
+```ini
+# Before (serialmux):
+[mcu]
+serial: /tmp/klipper_mcu        # symlink to /dev/pts/…
+
+# After (windlass-bridge):
+[mcu]
+serial: /tmp/klipper_mcu0
+restart_method: command
+
+[mcu nozzle_mcu]
+serial: /tmp/klipper_mcu1
+restart_method: command
+```
+
+Klipper supports Unix domain socket paths directly in the `serial:` field, so
+no additional configuration is needed.
+
+### Limitations
+
+- **No TCP channel tunnelling** — `F_TCONN`/`F_TDATA`/`F_TCLOSE` frames are
+  not supported.  Users who rely on the TCP tunnel (e.g. for Moonraker) must
+  keep using `serialmux`.
+- **No PTY** — Klipper's `serial:` field must point to the Unix socket path,
+  not a `/dev/pts/…` device.
+- **Both ends must match** — mixing a `serialmux` exporter with a
+  `windlass-bridge` host (or vice versa) will not work.

@@ -1,0 +1,199 @@
+version: '3'
+
+tasks:
+  default:
+    cmds:
+      - task: native
+
+  all:
+    desc: Build the native serialmux binary
+    cmds:
+      - task: native
+
+  native:
+    desc: Build build/serialmux with the native C compiler
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        CC="${CC:-gcc}"
+        CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -ffunction-sections -fdata-sections"
+        LDFLAGS="-Wl,--gc-sections"
+        mkdir -p "$BUILD"
+        "$CC" $CFLAGS $LDFLAGS -o "$BUILD/serialmux" src/serialmux.c src/channels.c
+
+  mipsel:
+    desc: Build build/serialmux.mipsel with the musl.cc MIPSEL toolchain
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        MIPSEL_TRIPLE="${MIPSEL_TRIPLE:-mipsel-linux-musl}"
+        MIPSEL_CC="${MIPSEL_CC:-$TOOLCHAIN_DIR/$MIPSEL_TRIPLE-cross/bin/$MIPSEL_TRIPLE-gcc}"
+        MIPSEL_STRIP="${MIPSEL_STRIP:-$TOOLCHAIN_DIR/$MIPSEL_TRIPLE-cross/bin/$MIPSEL_TRIPLE-strip}"
+        CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -ffunction-sections -fdata-sections"
+        LDFLAGS="-Wl,--gc-sections"
+        STATIC="-static"
+        mkdir -p "$BUILD"
+        "$MIPSEL_CC" $CFLAGS $LDFLAGS $STATIC -o "$BUILD/serialmux.mipsel" src/serialmux.c src/channels.c
+        "$MIPSEL_STRIP" "$BUILD/serialmux.mipsel" || true
+
+  aarch64:
+    desc: Build build/serialmux.aarch64 with the musl.cc AArch64 toolchain
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        AARCH64_TRIPLE="${AARCH64_TRIPLE:-aarch64-linux-musl}"
+        AARCH64_CC="${AARCH64_CC:-$TOOLCHAIN_DIR/$AARCH64_TRIPLE-cross/bin/$AARCH64_TRIPLE-gcc}"
+        AARCH64_STRIP="${AARCH64_STRIP:-$TOOLCHAIN_DIR/$AARCH64_TRIPLE-cross/bin/$AARCH64_TRIPLE-strip}"
+        CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -ffunction-sections -fdata-sections"
+        LDFLAGS="-Wl,--gc-sections"
+        STATIC="-static"
+        mkdir -p "$BUILD"
+        "$AARCH64_CC" $CFLAGS $LDFLAGS $STATIC -o "$BUILD/serialmux.aarch64" src/serialmux.c src/channels.c
+        "$AARCH64_STRIP" "$BUILD/serialmux.aarch64" || true
+
+  armv7:
+    desc: Build build/serialmux.armv7 with the musl.cc ARMv7 toolchain
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        ARMV7_TRIPLE="${ARMV7_TRIPLE:-arm-linux-musleabihf}"
+        ARMV7_CC="${ARMV7_CC:-$TOOLCHAIN_DIR/$ARMV7_TRIPLE-cross/bin/$ARMV7_TRIPLE-gcc}"
+        ARMV7_STRIP="${ARMV7_STRIP:-$TOOLCHAIN_DIR/$ARMV7_TRIPLE-cross/bin/$ARMV7_TRIPLE-strip}"
+        CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -ffunction-sections -fdata-sections"
+        LDFLAGS="-Wl,--gc-sections"
+        STATIC="-static"
+        mkdir -p "$BUILD"
+        "$ARMV7_CC" $CFLAGS $LDFLAGS $STATIC -o "$BUILD/serialmux.armv7" src/serialmux.c src/channels.c
+        "$ARMV7_STRIP" "$BUILD/serialmux.armv7" || true
+
+  toolchain-mipsel:
+    desc: Download the musl.cc MIPSEL cross-toolchain into .toolchain
+    cmds:
+      - |
+        set -euo pipefail
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
+        MIPSEL_TRIPLE="${MIPSEL_TRIPLE:-mipsel-linux-musl}"
+        mkdir -p "$TOOLCHAIN_DIR"
+        curl -fL --progress-bar "$MUSL_CC_BASE/$MIPSEL_TRIPLE-cross.tgz" | tar -xz -C "$TOOLCHAIN_DIR"
+    status:
+      - test -x "${TOOLCHAIN_DIR:-$(pwd)/.toolchain}/${MIPSEL_TRIPLE:-mipsel-linux-musl}-cross/bin/${MIPSEL_TRIPLE:-mipsel-linux-musl}-gcc"
+
+  toolchain-aarch64:
+    desc: Download the musl.cc AArch64 cross-toolchain into .toolchain
+    cmds:
+      - |
+        set -euo pipefail
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
+        AARCH64_TRIPLE="${AARCH64_TRIPLE:-aarch64-linux-musl}"
+        mkdir -p "$TOOLCHAIN_DIR"
+        curl -fL --progress-bar "$MUSL_CC_BASE/$AARCH64_TRIPLE-cross.tgz" | tar -xz -C "$TOOLCHAIN_DIR"
+    status:
+      - test -x "${TOOLCHAIN_DIR:-$(pwd)/.toolchain}/${AARCH64_TRIPLE:-aarch64-linux-musl}-cross/bin/${AARCH64_TRIPLE:-aarch64-linux-musl}-gcc"
+
+  toolchain-armv7:
+    desc: Download the musl.cc ARMv7 cross-toolchain into .toolchain
+    cmds:
+      - |
+        set -euo pipefail
+        TOOLCHAIN_DIR="${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+        MUSL_CC_BASE="${MUSL_CC_BASE:-https://musl.cc}"
+        ARMV7_TRIPLE="${ARMV7_TRIPLE:-arm-linux-musleabihf}"
+        mkdir -p "$TOOLCHAIN_DIR"
+        curl -fL --progress-bar "$MUSL_CC_BASE/$ARMV7_TRIPLE-cross.tgz" | tar -xz -C "$TOOLCHAIN_DIR"
+    status:
+      - test -x "${TOOLCHAIN_DIR:-$(pwd)/.toolchain}/${ARMV7_TRIPLE:-arm-linux-musleabihf}-cross/bin/${ARMV7_TRIPLE:-arm-linux-musleabihf}-gcc"
+
+  toolchain:
+    desc: Download all musl.cc cross-toolchains into .toolchain
+    deps:
+      - toolchain-mipsel
+      - toolchain-aarch64
+      - toolchain-armv7
+
+  install-k1:
+    desc: Install the K1 binary and init script
+    deps:
+      - mipsel
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        K1_DIR="${K1_DIR:-/usr/data/pik1}"
+        K1_INIT_DIR="${K1_INIT_DIR:-/etc/init.d}"
+        install -d "$K1_DIR"
+        install -m 755 "$BUILD/serialmux.mipsel" "$K1_DIR/serialmux"
+        install -m 755 S99pik1 "$K1_INIT_DIR/S99pik1"
+        for svc in S50nginx_service S50unslung S50webcam S55klipper_mcu S55klipper_service S56moonraker_service S99guppyscreen; do
+          if [ -f "$K1_INIT_DIR/$svc" ]; then
+            echo "Disabling $svc"
+            mv "$K1_INIT_DIR/$svc" "$K1_INIT_DIR/_$svc"
+          fi
+        done
+
+  uninstall-k1:
+    desc: Remove the K1 binary and restore disabled init scripts
+    cmds:
+      - |
+        set -eu
+        K1_DIR="${K1_DIR:-/usr/data/pik1}"
+        K1_INIT_DIR="${K1_INIT_DIR:-/etc/init.d}"
+        rm -f "$K1_INIT_DIR/S99pik1"
+        rm -f "$K1_DIR/serialmux"
+        for svc in S50nginx_service S50unslung S50webcam S55klipper_mcu S55klipper_service S56moonraker_service S99guppyscreen; do
+          if [ -f "$K1_INIT_DIR/_$svc" ]; then
+            echo "Restoring $svc"
+            mv "$K1_INIT_DIR/_$svc" "$K1_INIT_DIR/$svc"
+          fi
+        done
+
+  install-pi:
+    desc: Install the Pi binary and systemd service
+    deps:
+      - aarch64
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        SUDO="${SUDO:-sudo}"
+        PI_DIR="${PI_DIR:-/opt/pik1}"
+        PI_SYSTEMD_DIR="${PI_SYSTEMD_DIR:-/etc/systemd/system}"
+        $SUDO install -d "$PI_DIR"
+        $SUDO install -m 755 "$BUILD/serialmux.aarch64" "$PI_DIR/serialmux"
+        $SUDO install -m 755 setup_pik1.sh "$PI_DIR/setup_pik1.sh"
+        sed "s|@INSTALL_DIR@|$PI_DIR|g" pik1.service.in | $SUDO tee "$PI_SYSTEMD_DIR/pik1.service" > /dev/null
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable pik1.service
+
+  uninstall-pi:
+    desc: Remove the Pi install and systemd service
+    cmds:
+      - |
+        set -eu
+        SUDO="${SUDO:-sudo}"
+        PI_DIR="${PI_DIR:-/opt/pik1}"
+        PI_SYSTEMD_DIR="${PI_SYSTEMD_DIR:-/etc/systemd/system}"
+        $SUDO systemctl disable pik1.service || true
+        $SUDO rm -f "$PI_SYSTEMD_DIR/pik1.service"
+        $SUDO systemctl daemon-reload
+        $SUDO rm -rf "$PI_DIR"
+
+  clean:
+    desc: Remove build outputs
+    cmds:
+      - rm -rf "${BUILD:-build}"
+
+  distclean:
+    desc: Remove build outputs and downloaded toolchains
+    deps:
+      - clean
+    cmds:
+      - rm -rf "${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"

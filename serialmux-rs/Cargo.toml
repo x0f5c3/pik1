@@ -1,0 +1,70 @@
+[package]
+name = "serialmux"
+version = "0.1.0"
+edition = "2024"
+description = "Klipper serial + TCP multiplexer over a USB CDC gadget link (Rust port)"
+
+[[bin]]
+name = "serialmux"
+path = "src/main.rs"
+
+# Optional windlass-bridge binary (native Klipper transport relay).
+# Enable with: cargo build --features windlass
+# This binary is NOT compatible with the Python/C serialmux daemon.
+[[bin]]
+name = "windlass-bridge"
+path = "src/bin/windlass_bridge.rs"
+required-features = ["windlass"]
+
+[features]
+# Native Klipper-protocol relay using tokio.  Adds a second binary
+# (`windlass-bridge`) that is faster, PTY-free, and more efficient
+# than the serialmux protocol but is NOT compatible with the C/Python
+# serialmux daemon.  Users must choose one or the other.
+windlass = [
+    "dep:windlass",
+    "dep:anchor",
+    "dep:tokio",
+    "dep:tokio-util",
+    "dep:bytes",
+    "dep:futures",
+]
+
+# Route logs directly into the systemd journal (sd_journal_sendv).
+# Requires libsystemd at link time; not needed when running under a
+# journal-connected stdio pipe.
+journald = ["dep:tracing-journald"]
+
+[dependencies]
+mio       = { version = "1.2",  features = ["os-poll", "net", "os-ext"] }
+crc32fast = "1.5"
+nix       = { version = "0.31", features = [
+    "term",   # termios: tcgetattr / tcsetattr / cfsetspeed
+    "fs",     # fcntl / open flags
+    "ioctl",  # kept for potential platform-specific ioctl use (e.g. TIOCGPTN)
+] }
+libc      = "0.2"
+
+# --- logging -----------------------------------------------------------------
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+# Optional: write structured logs directly to the systemd journal.
+tracing-journald   = { version = "0.3", optional = true }
+
+# --- windlass feature dependencies (optional) --------------------------------
+# windlass: host-side Klipper transport, used by smart-proxy exporter helpers.
+windlass   = { git = "https://github.com/x0f5c3/windlass", rev = "0b4e956f2040080603873b929cb0508c2b6212e0", optional = true }
+# anchor: MCU-side Klipper protocol, used by the smart-proxy host.
+anchor     = { git = "https://github.com/x0f5c3/anchor", rev = "e0770e216152b304ddf62c90dd86cd9c3d2025d1", features = ["std"], optional = true }
+futures    = { version = "0.3", optional = true }
+tokio      = { version = "1", features = ["full"], optional = true }
+tokio-util = { version = "0.7", features = ["codec"], optional = true }
+bytes      = { version = "1", optional = true }
+clap = { version = "4.6.1", features = ["derive"]}
+
+[profile.release]
+opt-level   = 3
+lto         = "thin"
+strip       = true
+codegen-units = 1

@@ -1,4 +1,13 @@
 __pycache__/
+serialmux-rs/target/
 .toolchain/
 build/serialmux
 build/serialmux.armv7
+
+# Stakpak session files
+.stakpak/session*
+.idea/
+target
+*.lock
+.vtcode
+vtcode.toml
