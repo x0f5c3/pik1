@@ -1089,19 +1089,32 @@ fn src_conn_update_interest(
     conn: &mut TcpConn,
     reg: &Registry,
 ) {
-    if !conn.in_sel {
-        return;
-    }
     // Pause reads when backpressured or when waiting to drain before close.
     let want_read = !(bp_paused || conn.close_pending);
     let want_write = !conn.txbuf.is_empty();
     let interest = match (want_read, want_write) {
-        (true, true) => Interest::READABLE | Interest::WRITABLE,
-        (true, false) => Interest::READABLE,
-        (false, true) => Interest::WRITABLE,
-        (false, false) => return, // deregister to avoid spurious wakeups
+        (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
+        (true, false) => Some(Interest::READABLE),
+        (false, true) => Some(Interest::WRITABLE),
+        (false, false) => None,
     };
-    let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
+
+    match interest {
+        Some(interest) => {
+            if conn.in_sel {
+                let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
+            } else {
+                let _ = reg.register(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
+                conn.in_sel = true;
+            }
+        }
+        None => {
+            if conn.in_sel {
+                let _ = reg.deregister(&mut conn.stream);
+                conn.in_sel = false;
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1461,16 +1474,31 @@ fn dst_conn_update_interest(
     conn: &mut TcpConn,
     reg: &Registry,
 ) {
-    if !conn.in_sel {
-        return;
-    }
     let want_write = !conn.txbuf.is_empty() || conn.connecting;
     let want_read = !(bp_paused || conn.close_pending);
+    let token = tcp_slot_token(ch_id, slot);
+
     let interest = match (want_read, want_write) {
-        (true, true) => Interest::READABLE | Interest::WRITABLE,
-        (true, false) => Interest::READABLE,
-        (false, true) => Interest::WRITABLE,
-        (false, false) => return,
+        (true, true) => Some(Interest::READABLE | Interest::WRITABLE),
+        (true, false) => Some(Interest::READABLE),
+        (false, true) => Some(Interest::WRITABLE),
+        (false, false) => None,
     };
-    let _ = reg.reregister(&mut conn.stream, tcp_slot_token(ch_id, slot), interest);
+
+    match interest {
+        Some(interest) => {
+            if conn.in_sel {
+                let _ = reg.reregister(&mut conn.stream, token, interest);
+            } else {
+                let _ = reg.register(&mut conn.stream, token, interest);
+                conn.in_sel = true;
+            }
+        }
+        None => {
+            if conn.in_sel {
+                let _ = reg.deregister(&mut conn.stream);
+                conn.in_sel = false;
+            }
+        }
+    }
 }
