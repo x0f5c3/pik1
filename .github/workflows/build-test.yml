@@ -40,7 +40,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain}}
-          target: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
