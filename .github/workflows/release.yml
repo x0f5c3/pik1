@@ -1,0 +1,307 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: mipsel-unknown-linux-musl
+            arch_name: mipsel
+          - target: aarch64-unknown-linux-musl
+            arch_name: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: serialmux-rs
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build serialmux
+        working-directory: serialmux-rs
+        run: |
+          cross build --release --target ${{ matrix.target }}
+          mkdir -p ../build
+          cp target/${{ matrix.target }}/release/serialmux ../build/serialmux.${{ matrix.arch_name }}
+
+      - name: Build windlass-bridge
+        working-directory: serialmux-rs
+        run: |
+          cross build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
+          cp target/${{ matrix.target }}/release/windlass-bridge ../build/windlass-bridge.${{ matrix.arch_name }}
+
+      - name: Generate checksums
+        working-directory: build
+        run: |
+          sha256sum serialmux.${{ matrix.arch_name }} > serialmux.${{ matrix.arch_name }}.sha256
+          sha256sum windlass-bridge.${{ matrix.arch_name }} > windlass-bridge.${{ matrix.arch_name }}.sha256
+          cat serialmux.${{ matrix.arch_name }}.sha256
+          cat windlass-bridge.${{ matrix.arch_name }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.arch_name }}
+          path: |
+            build/serialmux.${{ matrix.arch_name }}
+            build/serialmux.${{ matrix.arch_name }}.sha256
+            build/windlass-bridge.${{ matrix.arch_name }}
+            build/windlass-bridge.${{ matrix.arch_name }}.sha256
+          retention-days: 1
+
+  package:
+    name: Package Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate changelog with git-cliff
+        id: changelog
+        uses: orhun/git-cliff-action@v3
+        with:
+          config: cliff.toml
+          args: --current --strip header
+        env:
+          OUTPUT: CHANGELOG_BODY.md
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create checksums manifest
+        run: |
+          cd artifacts
+          {
+            echo "Serialmux Release Build"
+            echo "======================="
+            echo ""
+            echo "Build Date: $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "Version: ${{ steps.version.outputs.version }}"
+            echo ""
+            echo "serialmux (original daemon)"
+            echo "---------------------------"
+            for arch in mipsel aarch64; do
+              echo ""
+              echo "## $arch ($arch-unknown-linux-musl)"
+              echo ""
+              [ -f "serialmux.$arch.sha256" ] && cat "serialmux.$arch.sha256"
+            done
+            echo ""
+            echo "windlass-bridge (alternative Klipper transport)"
+            echo "------------------------------------------------"
+            for arch in mipsel aarch64; do
+              echo ""
+              echo "## $arch ($arch-unknown-linux-musl)"
+              echo ""
+              [ -f "windlass-bridge.$arch.sha256" ] && cat "windlass-bridge.$arch.sha256"
+            done
+          } > CHECKSUMS.txt
+          cat CHECKSUMS.txt
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          cp artifacts/serialmux.* release-assets/
+          cp artifacts/windlass-bridge.* release-assets/
+          cp artifacts/CHECKSUMS.txt release-assets/
+          cp setup_pik1.sh release-assets/
+          cp pik1.service.in release-assets/
+          cp S99pik1 release-assets/
+          cp readme.md release-assets/README.md
+
+          cat > release-assets/INSTALL.md << 'INSTALL'
+          # Installation Guide
+
+          ## Binaries Included
+
+          Each release includes:
+          - `serialmux.{mipsel,aarch64}` — Original multiprotocol daemon
+          - `windlass-bridge.{mipsel,aarch64}` — Alternative Klipper-only transport (faster, PTY-free)
+          - Checksums for verification
+          - Service files and setup scripts
+
+          ### Choose One Path
+
+          **Option A: serialmux (recommended for most users)**
+          - Works with multiple protocols (serial + TCP)
+          - PTY-based (compatible with existing setups)
+          - Install to K1 and Pi/CB1
+
+          **Option B: windlass-bridge (advanced, Klipper-only)**
+          - Faster, socket-based (no PTY overhead)
+          - Klipper traffic only (no TCP tunneling)
+          - Must run on both K1 and Pi/CB1
+
+          ## K1 Installation
+
+          1. Choose binary based on your path:
+             ```bash
+             BINARY="serialmux.mipsel"      # or: windlass-bridge.mipsel
+             scp $BINARY root@<k1-ip>:/usr/data/pik1/serialmux
+             ```
+
+          2. Install init script:
+             ```bash
+             scp S99pik1 root@<k1-ip>:/etc/init.d/S99pik1
+             ssh root@<k1-ip> chmod +x /etc/init.d/S99pik1 /usr/data/pik1/serialmux
+             ```
+
+          3. Reboot:
+             ```bash
+             ssh root@<k1-ip> reboot
+             ```
+
+          ## Pi/CB1 Installation
+
+          1. Copy binary:
+             ```bash
+             BINARY="serialmux.aarch64"     # or: windlass-bridge.aarch64
+             scp $BINARY pi@<cb1-ip>:/tmp/serialmux
+             ssh pi@<cb1-ip> sudo install -m 755 /tmp/serialmux /opt/pik1/serialmux
+             ```
+
+          2. Install systemd service:
+             ```bash
+             scp pik1.service.in pi@<cb1-ip>:/tmp/
+             ssh pi@<cb1-ip> "sed 's|@INSTALL_DIR@|/opt/pik1|g' /tmp/pik1.service.in | sudo tee /etc/systemd/system/pik1.service"
+             ```
+
+          3. Copy setup script:
+             ```bash
+             scp setup_pik1.sh pi@<cb1-ip>:/opt/pik1/
+             ssh pi@<cb1-ip> sudo chmod +x /opt/pik1/setup_pik1.sh
+             ```
+
+          4. Enable and start:
+             ```bash
+             ssh pi@<cb1-ip> sudo systemctl daemon-reload
+             ssh pi@<cb1-ip> sudo systemctl enable pik1.service
+             ssh pi@<cb1-ip> sudo systemctl start pik1.service
+             ssh pi@<cb1-ip> sudo systemctl status pik1.service
+             ```
+
+          ## Verifying Checksums
+
+          Before installing, verify binary integrity:
+
+          ```bash
+          sha256sum -c CHECKSUMS.txt
+          ```
+
+          All checksums should show ✓ OK.
+          INSTALL
+
+      - name: Build release notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          cat > release-notes.md << HEADER
+          ## Binaries
+
+          Two binaries are provided for each architecture (K1: mipsel, Pi/CB1: aarch64):
+
+          - **serialmux** — Original multiprotocol daemon (serial + TCP)
+          - **windlass-bridge** — Faster alternative (Klipper, PTY-free sockets)
+
+          See \`INSTALL.md\` for installation instructions.
+
+          ## Checksums
+
+          All binaries have SHA256 checksums. Run \`sha256sum -c CHECKSUMS.txt\` to verify.
+
+          ## Build Info
+
+          - Statically linked (musl libc), no runtime dependencies
+          - Release profile: \`-O3\`, thin LTO, stripped
+
+          ---
+
+          HEADER
+          # Append the git-cliff generated changelog body
+          cat CHANGELOG_BODY.md >> release-notes.md
+          cat release-notes.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.version, 'rc') || contains(steps.version.outputs.version, 'beta') || contains(steps.version.outputs.version, 'alpha') }}
+          body_path: release-notes.md
+          files: |
+            release-assets/serialmux.mipsel
+            release-assets/serialmux.aarch64
+            release-assets/windlass-bridge.mipsel
+            release-assets/windlass-bridge.aarch64
+            release-assets/serialmux.mipsel.sha256
+            release-assets/serialmux.aarch64.sha256
+            release-assets/windlass-bridge.mipsel.sha256
+            release-assets/windlass-bridge.aarch64.sha256
+            release-assets/CHECKSUMS.txt
+            release-assets/INSTALL.md
+            release-assets/setup_pik1.sh
+            release-assets/pik1.service.in
+            release-assets/S99pik1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-complete:
+    name: Build Complete
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Check build status
+        run: |
+          if [ "${{ needs.build.result }}" == "failure" ] || [ "${{ needs.package.result }}" == "failure" ]; then
+            echo "❌ Build failed"
+            exit 1
+          fi
+          echo "✅ Release built successfully"
+

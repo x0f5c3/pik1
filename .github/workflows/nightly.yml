@@ -1,0 +1,255 @@
+name: Nightly
+
+on:
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Force build even if no new commits'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  NIGHTLY_TAG: nightly
+
+jobs:
+  check-changes:
+    name: Check for new commits
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+      commit_date: ${{ steps.check.outputs.commit_date }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for changes since last nightly
+        id: check
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_DATE=$(git log -1 --format="%ci" | cut -d' ' -f1)
+          echo "short_sha=$SHORT_SHA" >> $GITHUB_OUTPUT
+          echo "commit_date=$COMMIT_DATE" >> $GITHUB_OUTPUT
+
+          # If forced via workflow_dispatch, always build
+          if [ "${{ github.event.inputs.force }}" == "true" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "Force build requested — skipping change check"
+            exit 0
+          fi
+
+          # Get the SHA that was used for the last nightly build (stored in tag annotation)
+          LAST_NIGHTLY_SHA=$(git tag -l "${{ env.NIGHTLY_TAG }}" --format='%(contents)' 2>/dev/null \
+            | grep -oP '(?<=sha: )[a-f0-9]+' || echo "")
+
+          CURRENT_SHA=$(git rev-parse HEAD)
+
+          if [ "$CURRENT_SHA" = "$LAST_NIGHTLY_SHA" ]; then
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No new commits since last nightly (SHA: $SHORT_SHA) — skipping"
+          else
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            echo "New commits detected (HEAD: $SHORT_SHA, last nightly: ${LAST_NIGHTLY_SHA:-none})"
+          fi
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: check-changes
+    if: needs.check-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: mipsel-unknown-linux-musl
+            arch_name: mipsel
+          - target: aarch64-unknown-linux-musl
+            arch_name: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: serialmux-rs
+          # Separate cache key for nightly so it doesn't pollute release cache
+          prefix-key: nightly
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Build serialmux
+        working-directory: serialmux-rs
+        run: |
+          cross build --release --target ${{ matrix.target }}
+          mkdir -p ../build
+          cp target/${{ matrix.target }}/release/serialmux \
+             ../build/serialmux.${{ matrix.arch_name }}
+
+      - name: Build windlass-bridge
+        working-directory: serialmux-rs
+        run: |
+          cross build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
+          cp target/${{ matrix.target }}/release/windlass-bridge \
+             ../build/windlass-bridge.${{ matrix.arch_name }}
+
+      - name: Generate checksums
+        working-directory: build
+        run: |
+          sha256sum serialmux.${{ matrix.arch_name }} \
+            > serialmux.${{ matrix.arch_name }}.sha256
+          sha256sum windlass-bridge.${{ matrix.arch_name }} \
+            > windlass-bridge.${{ matrix.arch_name }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-${{ matrix.arch_name }}
+          path: |
+            build/serialmux.${{ matrix.arch_name }}
+            build/serialmux.${{ matrix.arch_name }}.sha256
+            build/windlass-bridge.${{ matrix.arch_name }}
+            build/windlass-bridge.${{ matrix.arch_name }}.sha256
+          retention-days: 3
+
+  publish:
+    name: Publish Nightly Release
+    needs: [check-changes, build]
+    if: needs.check-changes.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate nightly changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v3
+        with:
+          config: cliff.toml
+          # Show only unreleased commits (since last stable tag, not nightly tag)
+          args: --unreleased --strip header --tag nightly
+        env:
+          OUTPUT: NIGHTLY_CHANGELOG.md
+          GITHUB_REPO: ${{ github.repository }}
+
+      - name: Create combined checksums manifest
+        run: |
+          {
+            echo "Serialmux Nightly Build"
+            echo "======================="
+            echo ""
+            echo "Build Date : $(date -u +'%Y-%m-%d %H:%M:%S UTC')"
+            echo "Commit     : ${{ needs.check-changes.outputs.short_sha }}"
+            echo "Branch     : ${{ github.ref_name }}"
+            echo ""
+            echo "serialmux (original daemon)"
+            echo "---------------------------"
+            for arch in mipsel aarch64; do
+              echo ""
+              printf "  %-10s " "$arch"
+              [ -f "artifacts/serialmux.$arch.sha256" ] && cat "artifacts/serialmux.$arch.sha256"
+            done
+            echo ""
+            echo ""
+            echo "windlass-bridge (alternative Klipper transport)"
+            echo "------------------------------------------------"
+            for arch in mipsel aarch64; do
+              echo ""
+              printf "  %-10s " "$arch"
+              [ -f "artifacts/windlass-bridge.$arch.sha256" ] && cat "artifacts/windlass-bridge.$arch.sha256"
+            done
+          } > CHECKSUMS.txt
+          cat CHECKSUMS.txt
+
+      - name: Build release notes
+        run: |
+          SHORT_SHA="${{ needs.check-changes.outputs.short_sha }}"
+          BUILD_DATE="$(date -u +'%Y-%m-%d %H:%M UTC')"
+
+          cat > release-notes.md << EOF
+          > ⚠️ **Nightly build** — automated, may be unstable. Use a tagged release for production.
+
+          **Built from:** \`${SHORT_SHA}\` on \`${{ github.ref_name }}\`
+          **Date:** ${BUILD_DATE}
+
+          ## Binaries
+
+          | Binary | K1 (mipsel) | Pi/CB1 (aarch64) |
+          |--------|-------------|------------------|
+          | \`serialmux\` | \`serialmux.mipsel\` | \`serialmux.aarch64\` |
+          | \`windlass-bridge\` | \`windlass-bridge.mipsel\` | \`windlass-bridge.aarch64\` |
+
+          Verify with: \`sha256sum -c CHECKSUMS.txt\`
+
+          ---
+
+          ## Unreleased Changes
+
+          EOF
+
+          # Append git-cliff unreleased log; fall back gracefully if empty
+          if [ -s NIGHTLY_CHANGELOG.md ]; then
+            cat NIGHTLY_CHANGELOG.md >> release-notes.md
+          else
+            echo "_No conventional commits since last stable release._" >> release-notes.md
+          fi
+
+          cat release-notes.md
+
+      # Force-update the nightly tag to current HEAD before creating the release.
+      # The tag annotation stores the SHA so check-changes can compare next time.
+      - name: Force-update nightly tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -fa "${{ env.NIGHTLY_TAG }}" \
+            -m "nightly sha: $(git rev-parse HEAD)" HEAD
+          git push origin "${{ env.NIGHTLY_TAG }}" --force
+
+      - name: Update nightly GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.NIGHTLY_TAG }}
+          name: "Nightly (${{ needs.check-changes.outputs.commit_date }} · ${{ needs.check-changes.outputs.short_sha }})"
+          prerelease: true
+          draft: false
+          body_path: release-notes.md
+          # Replace all assets on every nightly run
+          files: |
+            artifacts/serialmux.mipsel
+            artifacts/serialmux.aarch64
+            artifacts/windlass-bridge.mipsel
+            artifacts/windlass-bridge.aarch64
+            artifacts/serialmux.mipsel.sha256
+            artifacts/serialmux.aarch64.sha256
+            artifacts/windlass-bridge.mipsel.sha256
+            artifacts/windlass-bridge.aarch64.sha256
+            CHECKSUMS.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

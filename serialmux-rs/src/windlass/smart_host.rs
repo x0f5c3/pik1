@@ -158,7 +158,7 @@ impl Config for ProxyConfig {
         // Uses the root-level anchor::Writable re-export to write
         // VLQ-encoded integers into a Vec<u8> OutputBuffer.
         let mut resp = Vec::new();
-        (0u32).write(&mut resp); // cmd = 0 (identify_response)
+        0u32.write(&mut resp); // cmd = 0 (identify_response)
         offset.write(&mut resp); // offset
         (chunk.len() as u32).write(&mut resp); // data_len
         resp.extend_from_slice(chunk);

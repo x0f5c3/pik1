@@ -337,8 +337,13 @@ impl TxQueue {
 
         // SAFETY: `fd` is a valid open non-blocking file descriptor; the slice
         // `buf[head..head+avail]` lies within the allocated buffer.
-        let written =
-            unsafe { libc::write(fd, self.buf[head..].as_ptr() as *const libc::c_void, avail) };
+        let written = unsafe {
+            libc::write(
+                fd,
+                self.buf[head..].as_ptr() as *const libc::c_void,
+                avail as libc::size_t,
+            )
+        };
         if written < 0 {
             let e = std::io::Error::last_os_error();
             if e.raw_os_error()

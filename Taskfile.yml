@@ -186,6 +186,74 @@ tasks:
         $SUDO systemctl daemon-reload
         $SUDO rm -rf "$PI_DIR"
 
+  rust-mipsel:
+    desc: Build serialmux Rust binary for K1 (mipsel-unknown-linux-musl)
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        mkdir -p "$BUILD"
+        cd serialmux-rs
+        cross build --release --target mipsel-unknown-linux-musl
+        cp target/mipsel-unknown-linux-musl/release/serialmux "../$BUILD/serialmux.mipsel"
+        echo "Built: ../$BUILD/serialmux.mipsel"
+
+  rust-aarch64:
+    desc: Build serialmux Rust binary for Pi/CB1 (aarch64-unknown-linux-musl)
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        mkdir -p "$BUILD"
+        cd serialmux-rs
+        cross build --release --target aarch64-unknown-linux-musl
+        cp target/aarch64-unknown-linux-musl/release/serialmux "../$BUILD/serialmux.aarch64"
+        echo "Built: ../$BUILD/serialmux.aarch64"
+
+  rust:
+    desc: Build serialmux Rust binaries for both K1 and Pi/CB1
+    deps:
+      - rust-mipsel
+      - rust-aarch64
+
+  install-k1-rust:
+    desc: Install the Rust binary and init script to K1
+    deps:
+      - rust-mipsel
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        K1_DIR="${K1_DIR:-/usr/data/pik1}"
+        K1_INIT_DIR="${K1_INIT_DIR:-/etc/init.d}"
+        install -d "$K1_DIR"
+        install -m 755 "$BUILD/serialmux.mipsel" "$K1_DIR/serialmux"
+        install -m 755 S99pik1 "$K1_INIT_DIR/S99pik1"
+        for svc in S50nginx_service S50unslung S50webcam S55klipper_mcu S55klipper_service S56moonraker_service S99guppyscreen; do
+          if [ -f "$K1_INIT_DIR/$svc" ]; then
+            echo "Disabling $svc"
+            mv "$K1_INIT_DIR/$svc" "$K1_INIT_DIR/_$svc"
+          fi
+        done
+
+  install-pi-rust:
+    desc: Install the Rust binary and systemd service to Pi/CB1
+    deps:
+      - rust-aarch64
+    cmds:
+      - |
+        set -eu
+        BUILD="${BUILD:-build}"
+        SUDO="${SUDO:-sudo}"
+        PI_DIR="${PI_DIR:-/opt/pik1}"
+        PI_SYSTEMD_DIR="${PI_SYSTEMD_DIR:-/etc/systemd/system}"
+        $SUDO install -d "$PI_DIR"
+        $SUDO install -m 755 "$BUILD/serialmux.aarch64" "$PI_DIR/serialmux"
+        $SUDO install -m 755 setup_pik1.sh "$PI_DIR/setup_pik1.sh"
+        sed "s|@INSTALL_DIR@|$PI_DIR|g" pik1.service.in | $SUDO tee "$PI_SYSTEMD_DIR/pik1.service" > /dev/null
+        $SUDO systemctl daemon-reload
+        $SUDO systemctl enable pik1.service
+
   clean:
     desc: Remove build outputs
     cmds:
@@ -197,3 +265,15 @@ tasks:
       - clean
     cmds:
       - rm -rf "${TOOLCHAIN_DIR:-$(pwd)/.toolchain}"
+
+  changelog:
+    desc: Generate CHANGELOG.md using git-cliff (requires git-cliff installed)
+    cmds:
+      - git cliff --config cliff.toml -o CHANGELOG.md
+      - echo "Written to CHANGELOG.md"
+
+  changelog-preview:
+    desc: Preview changelog for the next (unreleased) version
+    cmds:
+      - git cliff --config cliff.toml --unreleased --strip header
+

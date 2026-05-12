@@ -1,0 +1,130 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+
+[remote.github]
+owner = "x0f5c3"
+repo = "pik1"
+
+
+[changelog]
+header = """
+# Changelog\n
+All notable changes to this project will be documented in this file.\n
+"""
+body = """
+{% if version %}## [{{ version | trim_start_matches(pat="v") }}] - {{ timestamp | date(format="%Y-%m-%d") }}
+{% else %}## [Unreleased]
+{% endif %}
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+  {{ commit.message | upper_first }}\
+  {% if commit.links %} \
+    {% for link in commit.links %}([{{ link.text }}]({{ link.href }})){% endfor %}\
+  {% endif %} \
+  ([`{{ commit.id | truncate(length=7, end="") }}`]({{ commit.id }}))\
+{% endfor %}
+{% endfor %}\n
+"""
+footer = ""
+trim = true
+
+[git]
+# Conventional commit types to include
+conventional_commits = true
+
+# Include commits that do NOT conform to conventional commits standard
+# (tagging them as "Other Changes" below via the catch-all group)
+filter_unconventional = false
+
+# Split commits on newlines so multi-line messages are handled cleanly
+split_commits = false
+
+# Process commit messages before classification
+commit_preprocessors = [
+    # Strip issue references from commit messages (e.g. "#123")
+    # They'll still appear as links in body via commit.links
+    { pattern = '\(#(\d+)\)', replace = "" },
+
+    # Strip "upstream: " prefix from cherry-picked upstream commits
+    { pattern = '^upstream:\s*', replace = "" },
+
+    # Normalize Merge commit messages (from fork merges / upstream syncs)
+    { pattern = "^Merge (pull request|branch|remote-tracking branch|tag) .*", replace = "Merge upstream changes" },
+    { pattern = "^Merge .*", replace = "Merge upstream changes" },
+]
+
+# How to classify commits into groups
+commit_parsers = [
+    # Conventional: features
+    { message = "^feat", group = "Features" },
+    { message = "^feature", group = "Features" },
+
+    # Conventional: bug fixes
+    { message = "^fix", group = "Bug Fixes" },
+    { message = "^bugfix", group = "Bug Fixes" },
+    { message = "^hotfix", group = "Bug Fixes" },
+
+    # Conventional: performance
+    { message = "^perf", group = "Performance" },
+
+    # Conventional: refactoring
+    { message = "^refactor", group = "Refactoring" },
+    { message = "^refac", group = "Refactoring" },
+
+    # Conventional: documentation
+    { message = "^doc", group = "Documentation" },
+
+    # Conventional: styling / formatting
+    { message = "^style", group = "Styling" },
+    { message = "^fmt", group = "Styling" },
+    { message = "^format", group = "Styling" },
+
+    # Conventional: tests
+    { message = "^test", group = "Testing" },
+
+    # Conventional: build system / deps
+    { message = "^build", group = "Build System" },
+    { message = "^deps", group = "Build System" },
+    { message = "^dep", group = "Build System" },
+    { message = "^cargo", group = "Build System" },
+
+    # Conventional: CI/CD
+    { message = "^ci", group = "CI/CD" },
+    { message = "^cd", group = "CI/CD" },
+
+    # Conventional: chore (skip in changelog unless it has meaningful content)
+    { message = "^chore\\(release\\)", skip = true },
+    { message = "^chore\\(changelog\\)", skip = true },
+    { message = "^chore", group = "Miscellaneous" },
+
+    # Skip pure merge commits collapsed above
+    { message = "^Merge upstream changes$", skip = true },
+
+    # Everything else that doesn't match CC format goes here
+    # This is the key setting for a fork with mixed commit history
+    { message = ".*", group = "Other Changes" },
+]
+
+# Protect breaking changes (!)
+protect_breaking_commits = false
+
+# Link patterns (e.g. issue/PR references)
+link_parsers = [
+    # GitHub issue/PR references: #123
+    { pattern = "#(\\d+)", href = "https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/issues/$1", text = "#$1" },
+
+    # GitHub commit references (full SHA)
+    { pattern = "[0-9a-f]{40}", href = "https://github.com/{{ remote.github.owner }}/{{ remote.github.repo }}/commit/$0" },
+]
+
+# Filter out tags that don't match our versioning scheme
+tag_pattern = "v[0-9].*"
+
+# Only include commits from the last tag to HEAD when generating
+skip_tags = ""
+
+# Sort commits within groups by date newest-first
+sort_commits = "newest"
+

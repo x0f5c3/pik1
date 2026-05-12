@@ -11,3 +11,4 @@ target
 *.lock
 .vtcode
 vtcode.toml
+build/*

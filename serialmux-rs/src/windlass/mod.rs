@@ -183,7 +183,7 @@ pub fn prepare_socket_path(path: &str) -> std::io::Result<()> {
                 ));
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
 
@@ -197,9 +197,9 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
 
     struct TestDir(PathBuf);
 

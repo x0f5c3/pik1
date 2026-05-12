@@ -1,0 +1,102 @@
+name: Build Test
+
+on:
+  pull_request:
+    paths:
+      - 'serialmux-rs/**'
+      - '.github/workflows/build-test.yml'
+      - 'Cross.toml'
+      - '.cargo/config.toml'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'serialmux-rs/**'
+      - '.github/workflows/build-test.yml'
+      - 'Cross.toml'
+      - '.cargo/config.toml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: mipsel-unknown-linux-musl
+            arch_name: mipsel
+          - target: aarch64-unknown-linux-musl
+            arch_name: aarch64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: serialmux-rs
+
+      - name: Install cross
+        run: cargo install cross
+
+      - name: Check formatting
+        working-directory: serialmux-rs
+        run: cargo fmt -- --check
+
+      - name: Run clippy
+        working-directory: serialmux-rs
+        run: cross clippy --target ${{ matrix.target }} -- -D warnings
+
+      - name: Build serialmux (debug)
+        working-directory: serialmux-rs
+        run: cross build --target ${{ matrix.target }}
+
+      - name: Build serialmux (release)
+        working-directory: serialmux-rs
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build windlass-bridge
+        working-directory: serialmux-rs
+        run: cross build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
+
+      - name: Check binary size
+        working-directory: serialmux-rs
+        run: |
+          echo "=== serialmux ===" 
+          ls -lh target/${{ matrix.target }}/release/serialmux
+          echo "=== windlass-bridge ===" 
+          ls -lh target/${{ matrix.target }}/release/windlass-bridge 2>/dev/null || echo "Not built in this config"
+
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: serialmux-rs
+
+      - name: Format check
+        working-directory: serialmux-rs
+        run: cargo fmt -- --check
+
+      - name: Clippy (native)
+        working-directory: serialmux-rs
+        run: cargo clippy -- -D warnings
+

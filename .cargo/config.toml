@@ -1,0 +1,20 @@
+[build]
+# Default build configuration for the workspace
+target-dir = "target"
+
+# Cross-compilation targets
+[target.mipsel-unknown-linux-musl]
+linker = "cross"
+runner = "cross"
+
+[target.aarch64-unknown-linux-musl]
+linker = "cross"
+runner = "cross"
+
+# Release profile optimizations
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
+codegen-units = 1
+
