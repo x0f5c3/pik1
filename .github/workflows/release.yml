@@ -46,17 +46,15 @@ jobs:
         run: cargo install --git https://github.com/cross-rs/cross cross
 
       - name: Build serialmux
-        working-directory: serialmux-rs
         run: |
           cross +nightly build --release --target ${{ matrix.target }}
-          mkdir -p ../build
-          cp target/${{ matrix.target }}/release/serialmux ../build/serialmux.${{ matrix.arch_name }}
+          mkdir -p ./build
+          cp target/${{ matrix.target }}/release/serialmux ./build/serialmux.${{ matrix.arch_name }}
 
       - name: Build windlass-bridge
-        working-directory: serialmux-rs
         run: |
           cross +nightly build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
-          cp target/${{ matrix.target }}/release/windlass-bridge ../build/windlass-bridge.${{ matrix.arch_name }}
+          cp target/${{ matrix.target }}/release/windlass-bridge ./build/windlass-bridge.${{ matrix.arch_name }}
 
       - name: Generate checksums
         working-directory: build

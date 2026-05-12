@@ -50,11 +50,11 @@ jobs:
 
       - name: Build serialmux (debug)
         working-directory: serialmux-rs
-        run: cross +nightly build --target ${{ matrix.target }}
+        run: cross +nightly build --target ${{ matrix.target }} --bin serialmux
 
       - name: Build serialmux (release)
         working-directory: serialmux-rs
-        run: cross +nightly build --release --target ${{ matrix.target }}
+        run: cross +nightly build --release --target ${{ matrix.target }} --bin serialmux
 
       - name: Build windlass-bridge
         working-directory: serialmux-rs
@@ -64,9 +64,9 @@ jobs:
         working-directory: serialmux-rs
         run: |
           echo "=== serialmux ==="
-          ls -lh target/${{ matrix.target }}/release/serialmux
+          du -h target/${{ matrix.target }}/release/serialmux
           echo "=== windlass-bridge ==="
-          ls -lh target/${{ matrix.target }}/release/windlass-bridge 2>/dev/null || echo "Not built in this config"
+          du -h target/${{ matrix.target }}/release/windlass-bridge 2>/dev/null || echo "Not built in this config"
 
   lint:
     name: Lint & Format
