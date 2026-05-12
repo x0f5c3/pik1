@@ -48,14 +48,6 @@ jobs:
       - name: Install cross
         run: cargo install --git https://github.com/cross-rs/cross cross
 
-      - name: Check formatting
-        working-directory: serialmux-rs
-        run: cargo fmt -- --check
-
-      - name: Run clippy
-        working-directory: serialmux-rs
-        run: cross clippy --target ${{ matrix.target }} -- -D warnings
-
       - name: Build serialmux (debug)
         working-directory: serialmux-rs
         run: cross +nightly build --target ${{ matrix.target }}
@@ -84,6 +76,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
