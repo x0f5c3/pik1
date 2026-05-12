@@ -3,11 +3,11 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to release (e.g., v0.1.0)'
+        description: "Version to release (e.g., v0.1.0)"
         required: true
         type: string
 
@@ -34,32 +34,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           target: ${{ matrix.target }}
+          toolchain: nightly
 
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: serialmux-rs
 
       - name: Install cross
-        run: cargo install cross
+        run: cargo install --git https://github.com/cross-rs/cross cross
 
       - name: Build serialmux
         working-directory: serialmux-rs
         run: |
-          cross build --release --target ${{ matrix.target }}
+          cross +nightly build --release --target ${{ matrix.target }}
           mkdir -p ../build
           cp target/${{ matrix.target }}/release/serialmux ../build/serialmux.${{ matrix.arch_name }}
 
       - name: Build windlass-bridge
         working-directory: serialmux-rs
         run: |
-          cross build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
+          cross +nightly build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
           cp target/${{ matrix.target }}/release/windlass-bridge ../build/windlass-bridge.${{ matrix.arch_name }}
 
       - name: Generate checksums
@@ -304,4 +301,3 @@ jobs:
             exit 1
           fi
           echo "✅ Release built successfully"
-

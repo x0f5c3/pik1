@@ -6,8 +6,9 @@ passthrough = ["RUSTFLAGS"]
 
 # K1 (mipsel-unknown-linux-musl) — built with cross-rs + Docker
 [target.mipsel-unknown-linux-musl]
-image = "ghcr.io/cross-rs/mips:latest"
+image = "ghcr.io/cross-rs/mipsel-unknown-linux-musl:latest"
+build-std = ["std", "panic_abort", "proc_macro"]
 
 # Pi/CB1 (aarch64-unknown-linux-musl) — built with cross-rs
 [target.aarch64-unknown-linux-musl]
-image = "ghcr.io/cross-rs/aarch64:latest"
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-musl:latest"

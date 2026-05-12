@@ -3,11 +3,11 @@ name: Nightly
 on:
   schedule:
     # Run daily at 02:00 UTC
-    - cron: '0 2 * * *'
+    - cron: "0 2 * * *"
   workflow_dispatch:
     inputs:
       force:
-        description: 'Force build even if no new commits'
+        description: "Force build even if no new commits"
         required: false
         default: false
         type: boolean
@@ -79,13 +79,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - uses: taiki-e/setup-cross-toolchain-action@v1
+      - uses: dtolnay/rust-toolchain@master
         with:
           target: ${{ matrix.target }}
+          toolchain: nightly
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -94,12 +91,12 @@ jobs:
           prefix-key: nightly
 
       - name: Install cross
-        run: cargo install cross
+        run: cargo install --git https://github.com/cross-rs/cross cross
 
       - name: Build serialmux
         working-directory: serialmux-rs
         run: |
-          cross build --release --target ${{ matrix.target }}
+          cross +nightly build --release --target ${{ matrix.target }}
           mkdir -p ../build
           cp target/${{ matrix.target }}/release/serialmux \
              ../build/serialmux.${{ matrix.arch_name }}
@@ -107,7 +104,7 @@ jobs:
       - name: Build windlass-bridge
         working-directory: serialmux-rs
         run: |
-          cross build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
+          cross +nightly build --release --target ${{ matrix.target }} --features windlass --bin windlass-bridge
           cp target/${{ matrix.target }}/release/windlass-bridge \
              ../build/windlass-bridge.${{ matrix.arch_name }}
 
@@ -252,4 +249,3 @@ jobs:
             CHECKSUMS.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
